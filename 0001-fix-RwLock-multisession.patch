@@ -1,0 +1,558 @@
+From 6a53df3a343466bf7116669a94c302793cdc9444 Mon Sep 17 00:00:00 2001
+From: sunheeday <k2mseungh2@gmail.com>
+Date: Thu, 19 Mar 2026 15:41:55 +0900
+Subject: [PATCH] fix: RwLock multisession
+
+---
+ src/lib.rs                     | 241 ++++++++++++++++++++++-----------
+ src/test/mod.rs                |   1 +
+ src/test/multi_session_test.rs | 126 +++++++++++++++++
+ 3 files changed, 288 insertions(+), 80 deletions(-)
+ create mode 100644 src/test/multi_session_test.rs
+
+diff --git a/src/lib.rs b/src/lib.rs
+index 71ff6bd..7abc955 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -35,8 +35,9 @@ pub use participant::ProtocolParticipant;
+ pub use protocol::{
+     participant_config::ParticipantConfig, Identifier, Participant, ParticipantIdentifier,
+ };
++use std::collections::HashMap;
+ use std::panic::{self, AssertUnwindSafe};
+-use std::sync::Mutex;
++use std::sync::{Arc, Mutex, RwLock};
+ use wasm_bindgen::prelude::*;
+ 
+ use crate::auxinfo::AuxInfoParticipant;
+@@ -64,23 +65,29 @@ mod safe_primes_512;
+ 
+ type C = K256;
+ 
++// 세션 키: sid 만으로 세션을 구분합니다. (같은 sid 로 두 번 참가하는 경우 없음)
++pub(crate) type SessionKey = u64;
++
++
++const INITIAL_SESSION_CAPACITY: usize = 64;
++
+ lazy_static! {
+-    static ref TSHAREPARTICIPANT: Mutex<TshareParticipant<C>> =
+-        Mutex::new(TshareParticipant::<C>::default());
+-    static ref AUXINFOPARTICIPANT: Mutex<AuxInfoParticipant<C>> =
+-        Mutex::new(AuxInfoParticipant::<C>::default());
+-    static ref TREFRESHPARTICIPANT: Mutex<TrefreshParticipant<C>> =
+-        Mutex::new(TrefreshParticipant::<C>::default());
+-    static ref TPRESIGNPARTICIPANT: Mutex<TpresignParticipant<C>> =
+-        Mutex::new(TpresignParticipant::<C>::default());
+-    static ref SIGNPARTICIPANT: Mutex<SignParticipant<C>> =
+-        Mutex::new(SignParticipant::<C>::default());
+-    static ref TPRESIGNABORTPARTICIPANT: Mutex<TpresignAbortParticipant<C>> =
+-        Mutex::new(TpresignAbortParticipant::<C>::default());
+-    static ref TRECOVERTARGETPARTICIPANT: Mutex<TrecoverTargetParticipant<C>> =
+-        Mutex::new(TrecoverTargetParticipant::<C>::default());
+-    static ref TRECOVERHELPERPARTICIPANT: Mutex<TrecoverHelperParticipant<C>> =
+-        Mutex::new(TrecoverHelperParticipant::<C>::default());
++    pub(crate) static ref TSHAREPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<TshareParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref AUXINFOPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<AuxInfoParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref TREFRESHPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<TrefreshParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref TPRESIGNPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<TpresignParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref SIGNPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<SignParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref TPRESIGNABORTPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<TpresignAbortParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref TRECOVERTARGETPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<TrecoverTargetParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
++    pub(crate) static ref TRECOVERHELPERPARTICIPANT: Arc<RwLock<HashMap<SessionKey, Mutex<TrecoverHelperParticipant<C>>>>> =
++        Arc::new(RwLock::new(HashMap::with_capacity(INITIAL_SESSION_CAPACITY)));
+ }
+ 
+ pub fn participant_factory(
+@@ -90,6 +97,8 @@ pub fn participant_factory(
+     other_participant_ids: &[u64],
+     input: &str,
+ ) {
++    let session_key: SessionKey = sid;
++
+     match participant_type {
+         "AuxInfo" => {
+             let participant = AuxInfoParticipant::<C>::new(
+@@ -99,8 +108,8 @@ pub fn participant_factory(
+                 (),
+             )
+             .expect("Failed to create AuxInfoParticipant");
+-            let mut auxinfo_participant = AUXINFOPARTICIPANT.lock().unwrap();
+-            *auxinfo_participant = participant;
++            // write 락은 insert 하는 순간만 점유, 이후 즉시 해제
++            AUXINFOPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "TShare" => {
+             let input: <TshareParticipant<C> as participant::ProtocolParticipant>::Input =
+@@ -112,8 +121,7 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create TshareParticipant");
+-            let mut tshare_participant = TSHAREPARTICIPANT.lock().unwrap();
+-            *tshare_participant = participant;
++            TSHAREPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "TRefresh" => {
+             let input: <TrefreshParticipant<C> as participant::ProtocolParticipant>::Input =
+@@ -125,8 +133,7 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create TrefreshParticipant");
+-            let mut trefresh_participant = TREFRESHPARTICIPANT.lock().unwrap();
+-            *trefresh_participant = participant;
++            TREFRESHPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "TPreSign" => {
+             let input: <TpresignParticipant<C> as participant::ProtocolParticipant>::Input =
+@@ -138,16 +145,24 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create TpresignParticipant");
+-            let mut tpresign_participant = TPRESIGNPARTICIPANT.lock().unwrap();
+-            *tpresign_participant = participant;
++            TPRESIGNPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "TPreSignAbort" => {
+             let tpresign_input: <TpresignParticipant<C> as participant::ProtocolParticipant>::Input =
+                 serde_json::from_str(input).expect("Failed to parse input JSON");
+-            let mut tpresign_participant = TPRESIGNPARTICIPANT.lock().unwrap();
+-            let local_storage = tpresign_participant
+-                .get_localstorage()
+-                .expect("Failed to get local storage from TpresignParticipant");
++
++            // read 락으로 HashMap 조회 → 세션 Mutex 로 개별 락
++            let local_storage = {
++                let map = TPRESIGNPARTICIPANT.read().unwrap();
++                let mut participant = map
++                    .get(&session_key)
++                    .expect("TpresignParticipant not found for session key")
++                    .lock().unwrap();
++                participant
++                    .get_localstorage()
++                    .expect("Failed to get local storage from TpresignParticipant")
++            };
++
+             let input =
+                 <TpresignAbortParticipant<C> as participant::ProtocolParticipant>::Input::new(
+                     local_storage,
+@@ -161,8 +176,7 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create TpresignAbortParticipant");
+-            let mut tpresign_abort_participant = TPRESIGNABORTPARTICIPANT.lock().unwrap();
+-            *tpresign_abort_participant = participant;
++            TPRESIGNABORTPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "Sign" => {
+             let input: <SignParticipant<C> as participant::ProtocolParticipant>::Input =
+@@ -174,8 +188,7 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create SignParticipant");
+-            let mut sign_participant = SIGNPARTICIPANT.lock().unwrap();
+-            *sign_participant = participant;
++            SIGNPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "TRecoverTarget" => {
+             let input: <TrecoverTargetParticipant<C> as participant::ProtocolParticipant>::Input =
+@@ -187,8 +200,7 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create TrecoverTargetParticipant");
+-            let mut recover_target_participant = TRECOVERTARGETPARTICIPANT.lock().unwrap();
+-            *recover_target_participant = participant;
++            TRECOVERTARGETPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         "TRecoverHelper" => {
+             let input: <TrecoverHelperParticipant<C> as participant::ProtocolParticipant>::Input =
+@@ -200,8 +212,7 @@ pub fn participant_factory(
+                 input,
+             )
+             .expect("Failed to create TrecoverHelperParticipant");
+-            let mut recover_helper_participant = TRECOVERHELPERPARTICIPANT.lock().unwrap();
+-            *recover_helper_participant = participant;
++            TRECOVERHELPERPARTICIPANT.write().unwrap().insert(session_key, Mutex::new(participant));
+         }
+         _ => panic!("Unknown participant type"),
+     }
+@@ -333,87 +344,122 @@ pub fn ready_message_factory(participant_type: &str, sid: u64, my_id: u64) -> St
+     };
+ }
+ 
+-pub fn delegate_process_message(participant_type: &str, message: &str) -> String {
++pub fn delegate_process_message(participant_type: &str, sid: u64, message: &str) -> String {
+     let message: Message = serde_json::from_str(message).expect("Failed to parse message JSON");
+     let mut rng = rand::thread_rng();
+ 
++    let session_key: SessionKey = sid;
++
+     match participant_type {
+         "AuxInfo" => {
+-            let mut auxinfo_participant = AUXINFOPARTICIPANT.lock().unwrap();
+-            let res = auxinfo_participant
++            let map = AUXINFOPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("AuxInfoParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in AuxInfoParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "TShare" => {
+-            let mut tshare_participant = TSHAREPARTICIPANT.lock().unwrap();
+-            let res = tshare_participant
++            let map = TSHAREPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("TshareParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in TshareParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "TRefresh" => {
+-            let mut trefresh_participant = TREFRESHPARTICIPANT.lock().unwrap();
+-            let res = trefresh_participant
++            let map = TREFRESHPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("TrefreshParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in TrefreshParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "TPreSign" => {
+-            let mut tpresign_participant = TPRESIGNPARTICIPANT.lock().unwrap();
+-            let res = tpresign_participant
++            let map = TPRESIGNPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("TpresignParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in TpresignParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "TPresignAbort" => {
+-            let mut tpresign_abort_participant = TPRESIGNABORTPARTICIPANT.lock().unwrap();
+-            let res = tpresign_abort_participant
++            let map = TPRESIGNABORTPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("TpresignAbortParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+-                .expect("Failed to process message in TpresignParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++                .expect("Failed to process message in TpresignAbortParticipant");
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "Sign" => {
+-            let mut sign_participant = SIGNPARTICIPANT.lock().unwrap();
+-            let res = sign_participant
++            let map = SIGNPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("SignParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in SignParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "TRecoverTarget" => {
+-            let mut trecover_target_participant = TRECOVERTARGETPARTICIPANT.lock().unwrap();
+-            let res = trecover_target_participant
++            let map = TRECOVERTARGETPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("TrecoverTargetParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in TrecoverTargetParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         "TRecoverHelper" => {
+-            let mut trecover_helper_participant = TRECOVERHELPERPARTICIPANT.lock().unwrap();
+-            let res = trecover_helper_participant
++            let map = TRECOVERHELPERPARTICIPANT.read().unwrap();
++            let mut participant = map
++                .get(&session_key)
++                .expect("TrecoverHelperParticipant not found for session key")
++                .lock().unwrap();
++            let res = participant
+                 .process_message(&mut rng, &message)
+                 .expect("Failed to process message in TrecoverHelperParticipant");
+-            let res_json =
+-                serde_json::to_string(&res).expect("Failed to serialize response to JSON");
+-            return res_json;
++            serde_json::to_string(&res).expect("Failed to serialize response to JSON")
+         }
+         _ => panic!("Unknown participant type"),
+     }
+ }
+ 
++/// 세션 완료 후 메모리에서 참여자 객체를 제거합니다.
++/// Java 서버에서 프로토콜 라운드가 모두 끝난 뒤 반드시 호출해야 메모리 누수를 방지합니다.
++pub fn remove_session(participant_type: &str, sid: u64) {
++    let session_key: SessionKey = sid;
++    match participant_type {
++        "AuxInfo"         => { AUXINFOPARTICIPANT.write().unwrap().remove(&session_key); }
++        "TShare"          => { TSHAREPARTICIPANT.write().unwrap().remove(&session_key); }
++        "TRefresh"        => { TREFRESHPARTICIPANT.write().unwrap().remove(&session_key); }
++        "TPreSign"        => { TPRESIGNPARTICIPANT.write().unwrap().remove(&session_key); }
++        "TPreSignAbort"   => { TPRESIGNABORTPARTICIPANT.write().unwrap().remove(&session_key); }
++        "Sign"            => { SIGNPARTICIPANT.write().unwrap().remove(&session_key); }
++        "TRecoverTarget"  => { TRECOVERTARGETPARTICIPANT.write().unwrap().remove(&session_key); }
++        "TRecoverHelper"  => { TRECOVERHELPERPARTICIPANT.write().unwrap().remove(&session_key); }
++        _ => panic!("Unknown participant type"),
++    }
++}
++
+ pub fn generate_tshare_input(auxinfo_output: &str, threshold: usize) -> String {
+     let auxinfo_output: auxinfo::Output =
+         serde_json::from_str(auxinfo_output).expect("Failed to parse auxinfo output JSON");
+@@ -777,11 +823,13 @@ pub extern "C" fn Java_com_zkrypto_cryptolib_TssBridge_readyMessageFactory<'loca
+ }
+ 
+ /// Java: com.zkrypto.cryptolib.TssBridge.delegateProcessMessage
++/// 시그니처 변경: sid 파라미터 추가 (세션 구분을 위해 Java에서 넘겨야 합니다)
+ #[no_mangle]
+ pub extern "C" fn Java_com_zkrypto_cryptolib_TssBridge_delegateProcessMessage<'local>(
+     mut env: JNIEnv<'local>,
+     _class: JClass<'local>,
+     participant_type: JString<'local>,
++    sid: JString<'local>,
+     message: JString<'local>,
+ ) -> jstring {
+     let result = panic::catch_unwind(AssertUnwindSafe(|| {
+@@ -793,7 +841,11 @@ pub extern "C" fn Java_com_zkrypto_cryptolib_TssBridge_delegateProcessMessage<'l
+             .get_string(&message)
+             .expect("Couldn't get string")
+             .into();
+-        let res_json = delegate_process_message(&participant_type_str, &message_str);
++        let res_json = delegate_process_message(
++            &participant_type_str,
++            jni_utils::convert_jstring_to_u64(&mut env, sid),
++            &message_str,
++        );
+         env.new_string(res_json)
+             .expect("Couldn't create java string!")
+             .into_raw()
+@@ -1065,6 +1117,35 @@ pub extern "C" fn Java_com_zkrypto_cryptolib_TssBridge_generateTrecoverTargetInp
+     }
+ }
+ 
++/// Java: com.zkrypto.cryptolib.TssBridge.removeSession
++/// 프로토콜 완료 후 세션 메모리를 해제합니다. Java 서버에서 반드시 호출하세요.
++#[no_mangle]
++pub extern "C" fn Java_com_zkrypto_cryptolib_TssBridge_removeSession<'local>(
++    mut env: JNIEnv<'local>,
++    _class: JClass<'local>,
++    participant_type: JString<'local>,
++    sid: JString<'local>,
++) {
++    let result = panic::catch_unwind(AssertUnwindSafe(|| {
++        let participant_type_str: String = env
++            .get_string(&participant_type)
++            .expect("Couldn't get string")
++            .into();
++        remove_session(
++            &participant_type_str,
++            jni_utils::convert_jstring_to_u64(&mut env, sid),
++        );
++    }));
++
++    if result.is_err() {
++        env.throw_new(
++            "java/lang/RuntimeException",
++            "Rust panic occurred in removeSession",
++        )
++        .unwrap();
++    }
++}
++
+ /// Java: com.zkrypto.cryptolib.TssBridge.getMasterKey
+ #[no_mangle]
+ pub extern "C" fn Java_com_zkrypto_cryptolib_TssBridge_getMasterKey<'local>(
+diff --git a/src/test/mod.rs b/src/test/mod.rs
+index 9522b5b..3ca8be4 100644
+--- a/src/test/mod.rs
++++ b/src/test/mod.rs
+@@ -3,3 +3,4 @@ pub mod central_server;
+ pub mod ethereum_test;
+ pub mod integration_test;
+ pub mod test_utils;
++pub mod multi_session_test;
+\ No newline at end of file
+diff --git a/src/test/multi_session_test.rs b/src/test/multi_session_test.rs
+new file mode 100644
+index 0000000..8207df2
+--- /dev/null
++++ b/src/test/multi_session_test.rs
+@@ -0,0 +1,126 @@
++#[cfg(test)]
++mod multi_session_tests {
++    use std::sync::{Arc, Barrier};
++    use std::thread;
++
++    use crate::{
++        delegate_process_message, participant_factory, ready_message_factory, remove_session,
++        AUXINFOPARTICIPANT, SessionKey,
++    };
++
++    fn map_contains(sid: u64) -> bool {
++        let key: SessionKey = sid;
++        AUXINFOPARTICIPANT.read().unwrap().contains_key(&key)
++    }
++
++    // 테스트 1: State Overwrite 방지
++    #[test]
++    fn test_no_state_overwrite() {
++        let sid_a: u64 = 110001;
++        let sid_b: u64 = 110002;
++
++        participant_factory("AuxInfo", sid_a, 1, &[2], "");
++        assert!(map_contains(sid_a), "세션 A 등록 후 HashMap에 존재해야 함");
++
++        participant_factory("AuxInfo", sid_b, 1, &[2], "");
++        assert!(map_contains(sid_b), "세션 B 등록 후 HashMap에 존재해야 함");
++
++        // ★ 세션 B 등록 후에도 세션 A 가 살아있어야 함
++        assert!(map_contains(sid_a), "[State Overwrite 버그] 세션 B 등록 후 세션 A 가 사라짐");
++
++        remove_session("AuxInfo", sid_a);
++        remove_session("AuxInfo", sid_b);
++    }
++
++    // 테스트 2: 여러 세션 동시 공존
++    #[test]
++    fn test_multiple_sessions_coexist() {
++        let base_sid: u64 = 130000;
++        let n: u64 = 5;
++
++        for i in 0..n {
++            participant_factory("AuxInfo", base_sid + i, 1, &[2], "");
++        }
++        for i in 0..n {
++            assert!(map_contains(base_sid + i), "세션 {} 이 HashMap에 없음", base_sid + i);
++        }
++        for i in 0..n {
++            remove_session("AuxInfo", base_sid + i);
++        }
++    }
++
++    // 테스트 3: remove_session 이 해당 세션만 삭제
++    #[test]
++    fn test_remove_session_isolates_correctly() {
++        let sid_x: u64 = 140001;
++        let sid_y: u64 = 140002;
++
++        participant_factory("AuxInfo", sid_x, 1, &[2], "");
++        participant_factory("AuxInfo", sid_y, 1, &[2], "");
++
++        remove_session("AuxInfo", sid_x);
++
++        assert!(!map_contains(sid_x), "remove 후 sid_x 가 남아있으면 안 됨");
++        assert!(map_contains(sid_y),  "remove 가 sid_y 까지 삭제하면 안 됨");
++
++        remove_session("AuxInfo", sid_y);
++    }
++
++    // 테스트 4: 멀티스레드 동시 등록 — 데이터 유실 없음
++    #[test]
++    fn test_concurrent_registration_no_data_loss() {
++        let n_threads: u64 = 8;
++        let base_sid: u64 = 150000;
++
++        let barrier = Arc::new(Barrier::new(n_threads as usize));
++        let handles: Vec<_> = (0..n_threads)
++            .map(|i| {
++                let barrier = Arc::clone(&barrier);
++                thread::spawn(move || {
++                    barrier.wait();
++                    participant_factory("AuxInfo", base_sid + i, 1, &[2], "");
++                })
++            })
++            .collect();
++
++        for h in handles { h.join().expect("스레드 패닉"); }
++
++        let missing: Vec<u64> = (0..n_threads)
++            .filter(|&i| !map_contains(base_sid + i))
++            .map(|i| base_sid + i)
++            .collect();
++        assert!(missing.is_empty(), "[동시성 버그] 유실된 세션: {:?}", missing);
++
++        for i in 0..n_threads { remove_session("AuxInfo", base_sid + i); }
++    }
++
++    // 테스트 5: delegate_process_message 가 올바른 세션 참여자를 라우팅
++    #[test]
++    fn test_delegate_routes_to_correct_session() {
++        let sid_a: u64 = 160001;
++        let sid_b: u64 = 160002;
++
++        participant_factory("AuxInfo", sid_a, 1, &[2], "");
++        participant_factory("AuxInfo", sid_b, 1, &[2], "");
++
++        let ready_msg = ready_message_factory("AuxInfo", sid_a, 1);
++        let result = delegate_process_message("AuxInfo", sid_a, &ready_msg);
++
++        assert!(!result.is_empty(), "세션 A 메시지 처리 결과가 비어있으면 안 됨");
++        assert!(map_contains(sid_b), "세션 A 처리가 세션 B 에 영향을 줌");
++
++        remove_session("AuxInfo", sid_a);
++        remove_session("AuxInfo", sid_b);
++    }
++
++    // 테스트 6: 미등록 세션에 delegate 호출 시 패닉
++    #[test]
++    fn test_nonexistent_session_panics() {
++        let sid: u64 = 170001;
++        let ready_msg = ready_message_factory("AuxInfo", sid, 1);
++        let result = std::panic::catch_unwind(|| {
++            delegate_process_message("AuxInfo", sid, &ready_msg);
++        });
++        assert!(result.is_err(), "미등록 세션 호출 시 패닉이 발생해야 함");
++    }
++}
+\ No newline at end of file
+-- 
+2.39.5 (Apple Git-154)
+
