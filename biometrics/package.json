@@ -1,0 +1,29 @@
+{
+  "name": "@chronos-vault/biometrics",
+  "version": "0.1.0",
+  "description": "On-device face enrollment, liveness check and 128-D face vector extraction for Chronos Vault",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "fetch-models": "node scripts/fetch-models.mjs",
+    "dev": "vite demo",
+    "build:demo": "vite build demo",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "1.2.3",
+    "onnxruntime-web": "1.31.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}
