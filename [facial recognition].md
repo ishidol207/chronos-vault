@@ -27,6 +27,7 @@ biometrics/
     index.ts        # 외부 export 진입점
   scripts/
     fetch-models.mjs # MediaPipe / SFace 모델 다운로드 및 SHA-256 검증
+    copy-assets.mjs  # 모델과 wasm 런타임 파일을 다른 앱의 정적 폴더로 복사
   models/            # fetch-models 실행 후 모델 바이너리 저장 (git 미추적)
   demo/              # 웹캠 단독 테스트용 페이지 (Vite)
   test/              # Vitest 단위 테스트 및 SFace ONNX 통합 테스트
@@ -59,6 +60,37 @@ npm run dev
 ```
 
 `npm run dev` 실행 후 브라우저에서 `http://localhost:5179`로 들어가면 소유자(`owner`)와 상속인(`heir`) 얼굴을 각각 등록하고, 라이브니스 통과 후 코사인 유사도와 서버로 보낼 JSON payload를 바로 확인할 수 있습니다.
+
+### 2.1 다른 프로젝트(팀원 앱)에서 불러오기
+
+같은 레포 안의 다른 프론트엔드 프로젝트에서 이 모듈을 패키지처럼 불러오는 방법입니다. 새로 클론한 상태에서 아래 순서대로 하면 됩니다.
+
+1. **biometrics 쪽 준비 (한 번만)**: 앱에서 `npm install`을 해도 biometrics가 쓰는 MediaPipe와 ONNX Runtime은 같이 설치되지 않으므로, biometrics 폴더에서 직접 설치해야 합니다.
+   ```bash
+   cd biometrics
+   npm install
+   npm run fetch-models
+   ```
+2. **앱에 의존성 추가** (앱 폴더가 레포 루트 바로 아래에 있다고 가정, 예: `web/`):
+   ```bash
+   cd ../web
+   npm install ../biometrics
+   ```
+   `package.json`에 `"@chronos-vault/biometrics": "file:../biometrics"`가 추가됩니다.
+3. **모델과 wasm 파일 복사**: 브라우저가 실행 중에 받아 가는 파일들을 앱의 정적 폴더로 복사합니다. 모델을 다시 받거나 패키지를 업데이트한 뒤에도 다시 실행합니다.
+   ```bash
+   cd ../biometrics
+   npm run copy-assets -- ../web/public
+   ```
+   `public/models/`, `public/ort-wasm/`, `public/mp-wasm/`이 만들어지며, 3.1의 경로(`/models/...`, `/ort-wasm/`, `/mp-wasm`)와 그대로 맞습니다.
+4. **코드에서 사용**:
+   ```ts
+   import { BiometricsEngine, buildVerifyPayload, verifyVector } from '@chronos-vault/biometrics';
+   ```
+
+- 패키지는 TypeScript 소스를 그대로 내보내므로 Vite, webpack 등 TS를 처리하는 번들러에서 바로 동작합니다. Vite + `tsc` 조합으로 새로 클론한 상태에서 위 순서대로 설치, 빌드, 실행(같은 사람 사진 유사도 `0.84` 일치, 다른 사람 `-0.02` 불일치, 서버 payload 생성)까지 확인했습니다.
+- Next.js에서는 `next.config.js`에 `transpilePackages: ['@chronos-vault/biometrics']`를 추가해야 합니다.
+- **Rust/WASM 버전을 따로 만들지 않은 이유**: 지갑 모듈(`bitcoin/`)은 Rust를 `wasm-pack`으로 빌드해 `walletAddress`, `signShare` 같은 함수를 JSON 문자열로 주고받는 방식입니다. 얼굴인식은 무거운 부분(MediaPipe, ONNX Runtime)이 이미 WebAssembly로 동작하고 나머지는 카메라와 캔버스를 다루는 브라우저 코드라서, Rust로 다시 감싸도 속도나 정확도는 그대로이고 용량과 복잡도만 늘어납니다. 대신 지갑 모듈과 맞물리는 부분은 같은 방식으로 맞춰 두었습니다: 서버로 보내는 값은 `buildEnrollPayload` / `buildVerifyPayload`가 만드는 일반 JSON이고, 벡터는 pgvector 문자열입니다.
 
 ---
 
@@ -181,6 +213,31 @@ const vector = await engine.extractFromImage(img, undefined, { allowBackgroundFa
 ```
 
 - 웹캠 등록/인증(`enroll`, `verify`)은 이 옵션과 상관없이 항상 2명 이상이 잡히면 실패합니다.
+
+### 3.6 휴대폰 브라우저(모바일 웹)에서 사용할 때
+
+Chronos Vault는 브라우저 기반 앱이라 휴대폰에서도 같은 코드가 그대로 동작합니다. iPhone Safari에서 데모 페이지로 등록(눈 깜빡임, 고개 회전)과 인증이 정상 동작하는 것을 확인했습니다. 휴대폰에서는 아래 사항을 지켜야 합니다.
+
+- **HTTPS 필수**: 휴대폰 브라우저는 보안 연결(HTTPS) 페이지에서만 카메라를 허용합니다. 개발 중 `http://localhost`는 예외지만, 같은 와이파이의 PC 주소(`http://192.168...`)로 접속하면 카메라가 열리지 않습니다.
+- **첫 로딩 용량**: 모델 두 개가 약 42MB입니다. 브라우저 캐시에 남으므로 두 번째부터는 빠르지만, 모바일 데이터에서는 첫 로딩이 느립니다. 얼굴 인증 화면에 들어가기 전에 `BiometricsEngine.create()`를 미리 호출해 두고 "얼굴 인증 준비 중" 같은 안내를 보여 주는 것을 권장합니다.
+- **전면 카메라**: `openCamera()`는 기본으로 전면 카메라(`facingMode: 'user'`)를 엽니다.
+- **메모리 정리**: 모델이 올라가 있는 동안 탭이 수백 MB를 사용합니다. 오래된 iPhone은 메모리가 부족하면 페이지를 다시 불러오므로, 얼굴 인증 화면을 벗어날 때 `stopCamera()`와 `engine.dispose()`를 꼭 호출하세요.
+- **속도**: 저사양 휴대폰은 PC보다 몇 배 느릴 수 있습니다. 라이브니스 단계는 프레임 속도에 영향을 받으므로 실제 대상 기기에서 한 번씩 확인하는 것이 좋습니다.
+- **iPhone 브라우저**: iPhone의 모든 브라우저(Chrome 포함)는 Safari 엔진을 씁니다. 나중에 웹앱을 네이티브 앱(WebView)으로 감쌀 경우에는 카메라 권한과 인라인 미디어 재생 설정을 별도로 켜야 합니다.
+
+**휴대폰으로 직접 테스트하기 (Tailscale 사용 예)**
+
+개발 PC와 휴대폰이 같은 Tailscale 계정에 연결되어 있으면, 별도 인증서 없이 HTTPS 주소로 데모를 열 수 있습니다. 이 주소는 같은 Tailscale 계정의 기기에서만 열리고 인터넷에는 공개되지 않습니다.
+
+```bash
+cd biometrics
+npm run dev                                   # http://localhost:5179
+tailscale serve --bg --https=443 http://127.0.0.1:5179
+# 휴대폰 Safari/Chrome에서 https://<PC 이름>.<tailnet>.ts.net/ 접속
+tailscale serve --https=443 off               # 테스트가 끝나면 종료
+```
+
+처음 한 번은 Tailscale 관리 페이지에서 Serve(HTTPS 인증서) 사용을 허용해야 합니다. Vite가 외부 호스트 이름을 막으면 `demo/vite.config.ts`의 `server.allowedHosts`에 위 주소를 추가합니다.
 
 ---
 
