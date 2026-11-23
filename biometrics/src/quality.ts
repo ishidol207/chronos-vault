@@ -41,6 +41,30 @@ export interface QualityResult {
 
 const BORDER_MARGIN = 0.02;
 
+/**
+ * Default size ratio for `dominantFace`: the main face's inter-ocular distance must be at
+ * least this many times every other face's (a bystander or a face on a poster behind).
+ */
+export const DEFAULT_DOMINANCE_RATIO = 1.6;
+
+/**
+ * Index of the face that clearly dominates the frame, judged by inter-ocular distance, or -1
+ * when no single face is at least `ratio` times larger than all the others (two people of
+ * similar size: the caller should still reject the image).
+ */
+export function dominantFace(
+  faces: Landmark[][],
+  size: FrameSize,
+  ratio: number = DEFAULT_DOMINANCE_RATIO,
+): number {
+  if (faces.length === 0) return -1;
+  if (faces.length === 1) return 0;
+  const sizes = faces.map((f) => interOcularDistance(f, size));
+  let best = 0;
+  for (let i = 1; i < sizes.length; i++) if (sizes[i] > sizes[best]) best = i;
+  return sizes.every((s, i) => i === best || sizes[best] >= ratio * s) ? best : -1;
+}
+
 export function assessFrameQuality(
   faces: Landmark[][],
   size: FrameSize,

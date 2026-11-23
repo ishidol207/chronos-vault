@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LM, MIN_LANDMARKS, type FrameSize, type Landmark } from '../src/geometry';
-import { assessFrameQuality, qualityHint } from '../src/quality';
+import { assessFrameQuality, dominantFace, qualityHint } from '../src/quality';
 
 const SIZE: FrameSize = { width: 640, height: 480 };
 
@@ -72,5 +72,31 @@ describe('assessFrameQuality', () => {
   it('provides localized hints in Korean and English', () => {
     expect(qualityHint('face_too_small', 'ko')).toContain('가까이');
     expect(qualityHint('yaw_too_large', 'en')).toContain('straight');
+  });
+});
+
+describe('dominantFace', () => {
+  it('returns the only face, or -1 for none', () => {
+    expect(dominantFace([], SIZE)).toBe(-1);
+    expect(dominantFace([makeFace()], SIZE)).toBe(0);
+  });
+
+  it('picks a clearly larger face over a small background face', () => {
+    const main = makeFace({ cx: 0.5, scale: 1 });
+    const bystander = makeFace({ cx: 0.85, scale: 0.4 });
+    expect(dominantFace([bystander, main], SIZE)).toBe(1);
+    expect(dominantFace([main, bystander], SIZE)).toBe(0);
+  });
+
+  it('rejects two faces of similar size', () => {
+    const a = makeFace({ cx: 0.3, scale: 1 });
+    const b = makeFace({ cx: 0.7, scale: 0.8 });
+    expect(dominantFace([a, b], SIZE)).toBe(-1);
+  });
+
+  it('respects a custom ratio', () => {
+    const a = makeFace({ cx: 0.3, scale: 1 });
+    const b = makeFace({ cx: 0.7, scale: 0.8 });
+    expect(dominantFace([a, b], SIZE, 1.2)).toBe(0);
   });
 });

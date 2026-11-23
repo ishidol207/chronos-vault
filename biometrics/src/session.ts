@@ -26,7 +26,7 @@ import { eyeState, headPose } from './geometry';
 import { FaceDetector, type FaceDetectorOptions } from './landmarker';
 import { LivenessChallenge, randomChallenge, type ChallengeStep } from './liveness';
 import { verifyVector, type MatchResult } from './matcher';
-import { assessFrameQuality, qualityHint } from './quality';
+import { assessFrameQuality, DEFAULT_DOMINANCE_RATIO, dominantFace, qualityHint } from './quality';
 import type {
   AuthPurpose,
   EnrollResult,
@@ -76,6 +76,17 @@ export interface VerifySessionOptions extends CaptureSessionOptions {
 
 export interface LocalVerifyResult extends VerifyCaptureResult {
   match: MatchResult;
+}
+
+export interface ExtractImageOptions {
+  /**
+   * Static images only (live sessions always reject extra faces). When true, an image with
+   * more than one face is accepted if one face is clearly the largest (see `dominantFace`),
+   * and only that face is used. Two faces of similar size are still rejected. Default false.
+   */
+  allowBackgroundFaces?: boolean;
+  /** Size ratio for `allowBackgroundFaces`. Default `DEFAULT_DOMINANCE_RATIO` (1.6). */
+  dominanceRatio?: number;
 }
 
 export class BiometricsSessionError extends Error {
@@ -195,17 +206,24 @@ export class BiometricsEngine {
   async extractFromImage(
     image: DrawableImage,
     qualityCfg?: Partial<QualityConfig>,
+    options: ExtractImageOptions = {},
   ): Promise<FaceVector> {
     this.ensureAlive();
     await this.detector.setRunningMode('IMAGE');
     try {
       const size = getDrawableSize(image);
-      const faces = this.detector.detectImage(image as Parameters<FaceDetector['detectImage']>[0]);
+      let faces = this.detector.detectImage(image as Parameters<FaceDetector['detectImage']>[0]);
       if (faces.length === 0) {
         throw new BiometricsSessionError('no_face', 'No face detected in image');
       }
       if (faces.length > 1) {
-        throw new BiometricsSessionError('multiple_faces', 'Multiple faces detected in image');
+        const main = options.allowBackgroundFaces
+          ? dominantFace(faces, size, options.dominanceRatio ?? DEFAULT_DOMINANCE_RATIO)
+          : -1;
+        if (main < 0) {
+          throw new BiometricsSessionError('multiple_faces', 'Multiple faces detected in image');
+        }
+        faces = [faces[main]];
       }
       if (qualityCfg) {
         const q = assessFrameQuality(faces, size, qualityCfg);
