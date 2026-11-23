@@ -1,0 +1,8 @@
+/target/
+/pkg/
+/demo-wallet/
+/demo-recipient/
+/signed.json
+/party-*/
+/spent-nonces/
+/exchange-*/

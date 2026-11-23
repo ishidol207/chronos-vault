@@ -1,0 +1,43 @@
+[package]
+name = "chronos-vault"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+threshold-runner = ["dep:threshold-ecdsa", "dep:rand"]
+
+[[example]]
+name = "threshold-runner"
+path = "examples/threshold-runner/main.rs"
+required-features = ["threshold-runner"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+threshold-ecdsa-online = { path = "../threshold-online" }
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8"] }
+serde_json = "1"
+bitcoin = { version = "0.32.7", features = ["serde"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+zeroize = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+threshold-ecdsa = { path = "..", optional = true }
+rand = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+k256 = { version = "0.13", features = ["serde", "pem"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"

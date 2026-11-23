@@ -13,6 +13,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use sha3::{Digest, Keccak256};
 use tracing::{error, info};
+use threshold_ecdsa_online::{PartialSignature, SigningScalar};
 use zeroize::Zeroize;
 
 use crate::{
@@ -301,13 +302,10 @@ impl<C: CurveTrait> SignParticipant<C> {
         let x_projection = record.x_projection()?;
 
         // Compute the share
-        let share = SignatureShare::<C>::new(
-            x_projection,
-            record
-                .mask_share() // mask share: k
-                .mul(&digest)
-                .add(&x_projection.mul(record.masked_key_share())), // masked key share: chi
+        let partial = C::Scalar::partial(
+            x_projection, *record.mask_share(), *record.masked_key_share(), digest,
         );
+        let share = SignatureShare::<C>::new(partial.r, partial.share);
 
         // Erase the presign record
         self.input.presign_record.zeroize();
@@ -365,12 +363,12 @@ impl<C: CurveTrait> SignParticipant<C> {
 
         // Sum up the signature shares and convert to BIP-0062 format (negating if the
         // sum is > group order /2)
-        let mut sum = shares
-            .into_iter()
-            .fold(C::Scalar::zero(), |a, b| a.add(&b.share));
-
-        if sum.is_high() {
-            sum = sum.negate();
+        let partials: Vec<_> = shares.into_iter()
+            .map(|part| PartialSignature { r: part.r, share: part.share })
+            .collect();
+        let (r, sum) = C::Scalar::combine(&partials).ok_or(InternalError::ProtocolError(None))?;
+        if r != x_projection {
+            return Err(InternalError::ProtocolError(None));
         }
 
         let signature = C::ECDSASignature::from_scalars(

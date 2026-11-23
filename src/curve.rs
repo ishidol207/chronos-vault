@@ -128,7 +128,8 @@ pub trait VerifyingKeyTrait: Clone + Copy + Debug + Send + Sync + Eq + PartialEq
 
 /// Scalar trait.
 pub trait ScalarTrait:
-    Sync
+    threshold_ecdsa_online::SigningScalar
+    + Sync
     + Default
     + Send
     + Clone
