@@ -4,7 +4,7 @@
 
 ## 팀원이 테스트 지갑 만들기
 
-레포를 클론한 뒤 `bitcoin/`에서 실행한다. 로컬 데모용 실행기는 한 컴퓨터에서 참여자 1·2·3을 별도 Rust 프로세스로 띄워 루트 크레이트의 `AuxInfo`와 2-of-3 `TShare` 라운드를 진행한다. 각 프로세스는 자기 장기 키 조각과 보조 정보를 자기 폴더에 저장한다. 같은 OS 계정이 세 폴더를 모두 읽을 수 있다.
+레포를 클론한 뒤 `bitcoin/`에서 실행한다. 로컬 데모용 실행기는 한 컴퓨터에서 참여자 1·2·3을 별도 Rust 프로세스로 띄워 루트 크레이트의 `AuxInfo`와 2-of-3 `TShare` 라운드를 진행한다. 참여자 1(U, 사용자), 2(S, 서버), 3(R, 복구 담당)는 각자 자기 장기 키 조각과 보조 정보를 AES-256-GCM으로 암호화해 저장한다. 기본 구성은 한 컴퓨터의 세 로컬 폴더이며 같은 OS 계정이 모두 읽을 수 있다.
 
 ```sh
 cd bitcoin
@@ -18,7 +18,26 @@ printf '%s\n' "$MASTER_PK"
 "$BTC" address "$MASTER_PK"
 ```
 
-`keygen`은 새 디렉터리에만 지갑을 만들고, 세 참여자의 공개키가 일치하면 33바이트 압축 공개키를 hex로 출력한다. 팀원이 코디네이터에게 전달할 값은 이 **공개키와 Testnet4 입금 주소**다. `party-1/`부터 `party-3/`까지의 `aux.json`과 `share.json`은 다음 사전서명에 필요하므로 생성한 컴퓨터에 보관한다. 나중에 셸을 다시 열면 같은 지갑에서 `MASTER_PK=$(cat "$WALLET/public-key.json")`으로 공개키를 다시 읽을 수 있다. 지갑 루트의 `public-key.json`은 세 참여자가 모두 성공한 뒤에 생성된다. 키 생성이 중단되면 새 디렉터리로 다시 실행한다. 새 지갑의 주소로 faucet 입금을 받은 뒤 아래 절차를 진행한다.
+`keygen`은 새 디렉터리에만 지갑을 만들고, 세 참여자의 공개키가 일치하면 33바이트 압축 공개키를 hex로 출력한다. 팀원이 코디네이터에게 전달할 값은 이 **공개키와 Testnet4 입금 주소**다. 각 참여자의 암호화 파일과 해당 복호화 키는 담당자가 따로 보관한다. 나중에 셸을 다시 열면 같은 지갑에서 `MASTER_PK=$(cat "$WALLET/public-key.json")`으로 공개키를 다시 읽을 수 있다. 지갑 루트의 `public-key.json`은 세 참여자가 모두 성공한 뒤에 생성된다. 키 생성이 중단되면 새 디렉터리로 다시 실행한다. 새 지갑의 주소로 faucet 입금을 받은 뒤 아래 절차를 진행한다.
+
+### 키 생성 담당자가 인계할 값
+
+| 받는 쪽 | 전달하거나 보관하는 값 | 사용하는 곳 |
+| --- | --- | --- |
+| 거래 코디네이터 | 위 명령이 출력한 공동 공개키와 Testnet4 입금 주소 | `testnet4 prepare --public-key`에는 공동 공개키를 넣고, 입금에는 주소를 사용한다. |
+| U·S·R 각각의 보관 담당자 | 자기 참여자의 암호화 보관본 하나 | 기본 경로는 `$WALLET/party-N/secrets.cvparty`다. 복호화 키는 보관본과 분리해 관리한다. |
+
+각 보관본에 들어 있는 값은 해당 참여자의 `TShare` 출력과 `AuxInfo` 출력이다. 기존 `threshold-runner presign`은 요청에 지정된 두 참여자의 보관본을 열어 이 값을 서명 모듈에 넘긴다. 평문 파일로 생성된 예전 지갑도 원래 경로에서 읽을 수 있다.
+
+참여자별 위치를 지정하려면 **keygen 전에** 아래처럼 설정하고 이후 presign에도 같은 설정을 사용한다. N은 1, 2, 3이다. 지정한 저장 경로에서는 파일명이 `<공동공개키>-party-N.cvparty`가 된다.
+
+```sh
+# 예시: R 담당자의 서로 다른 두 마운트 경로
+export CHRONOS_PARTY_3_STORE_DIR=/mnt/recovery/chronos
+export CHRONOS_PARTY_3_KEY_DIR=/mnt/recovery-key/chronos
+```
+
+복호화 키 파일명은 `<공동공개키>-party-N.key`다. 기본 키 디렉터리는 `XDG_DATA_HOME` 또는 `LOCALAPPDATA` 아래의 `chronos-vault/keys`이며, 둘 다 없으면 `$HOME/.local/share/chronos-vault/keys`를 쓴다. 코디네이터가 요청을 만드는 데는 이 파일이 필요 없다.
 
 ## 송금
 
@@ -89,7 +108,7 @@ exec ssh -T party-one '/opt/chronos/testnet4 sign-share /vault/wallet /vault/wal
 ## 빌드와 검증
 
 ```sh
-cargo test --locked --all-targets
+cargo test --locked --all-targets --features threshold-runner
 rustup target add wasm32-unknown-unknown
 cargo build --release --locked --target wasm32-unknown-unknown --lib
 ```

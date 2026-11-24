@@ -1,8 +1,7 @@
-use super::{Job, Operation, Result, party_dir, write_new};
+use super::{Job, Operation, Result, party_dir, party_store, write_new};
 use chronos_vault::{PresignRecord, SignerIdentity, parse_master_key};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -188,8 +187,7 @@ pub(super) fn worker(dir: &Path, id: u64) -> Result<()> {
             let share = party.execute("TShare", share_sid, &input)?;
             let pk = get_master_pk(&share);
             let key = parse_master_key(&pk)?;
-            write_new(&dir.join("aux.json"), aux.as_bytes())?;
-            write_new(&dir.join("share.json"), share.as_bytes())?;
+            party_store::seal(dir, id, &key, &aux, &share)?;
             write_new(&dir.join("public-key.json"), pk.as_bytes())?;
             for &peer_id in &party.others {
                 let identity = SignerIdentity {
@@ -208,8 +206,7 @@ pub(super) fn worker(dir: &Path, id: u64) -> Result<()> {
             public_key,
             output,
         } => {
-            let aux = Zeroizing::new(fs::read_to_string(dir.join("aux.json"))?);
-            let share = Zeroizing::new(fs::read_to_string(dir.join("share.json"))?);
+            let (aux, share) = party_store::open(dir, id, &public_key)?;
             if parse_master_key(&get_master_pk(&share))? != public_key {
                 return Err("local key share does not match the requested public key".into());
             }

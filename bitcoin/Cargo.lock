@@ -277,6 +277,7 @@ dependencies = [
  "k256",
  "rand 0.8.8",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

@@ -6,3 +6,5 @@
 /party-*/
 /spent-nonces/
 /exchange-*/
+*.cvparty
+*-party-?.key

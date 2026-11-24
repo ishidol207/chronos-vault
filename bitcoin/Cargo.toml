@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-threshold-runner = ["dep:threshold-ecdsa", "dep:rand"]
+threshold-runner = ["dep:threshold-ecdsa", "dep:rand", "dep:ring"]
 
 [[example]]
 name = "threshold-runner"
@@ -27,6 +27,7 @@ zeroize = "1"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 threshold-ecdsa = { path = "..", optional = true }
 rand = { version = "0.8", optional = true }
+ring = { version = "0.17", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
