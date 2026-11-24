@@ -17,12 +17,33 @@ export const EMBEDDING_DIM = 128;
 export const SFACE_COSINE_THRESHOLD = 0.363;
 
 /**
+ * Recommended starting threshold for Chronos Vault Party 2 (server S) authorization.
+ * Achieved 0.00% FAR across both LFW 1,000-pair and 2,200-pair evaluations while
+ * keeping FRR under 1.5%. Calibrate further with `calibrateThreshold` on real device pairs.
+ */
+export const RECOMMENDED_VAULT_THRESHOLD = 0.4;
+
+/**
  * Threshold written in the project architecture document (tau = 0.85).
  * Kept here for reference only. It does not fit the SFace score distribution:
  * genuine SFace pairs rarely reach 0.85, so using it would reject the real owner.
  * Use `calibrateThreshold` with your own genuine/impostor pairs before deciding.
  */
 export const ARCHITECTURE_DOC_TAU = 0.85;
+
+/**
+ * Threshold ECDSA party IDs matching `bitcoin/` (`PARTIES = [1, 2, 3]`).
+ * Party 2 (SERVER) keeps its encrypted key share (`secrets.cvparty`) on the server
+ * and returns a partial signature (`PartyResponse`), never its long-term share.
+ */
+export const PARTY_ID = {
+  /** Party 1: user device (U). */
+  USER: 1,
+  /** Party 2: auth & co-signing server (S). */
+  SERVER: 2,
+  /** Party 3: recovery / designated heir share holder (R). */
+  RECOVERY: 3,
+} as const;
 
 export interface ModelPaths {
   /** Base URL of the MediaPipe tasks-vision wasm files. */

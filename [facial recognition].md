@@ -1,7 +1,7 @@
 # Chronos Vault 얼굴인식 모듈 사용 가이드
 
 `biometrics/` 폴더에 있는 얼굴인식 모듈 연동 문서입니다.
-Chronos Vault의 2-of-3 Shamir 구조(사용자 기기 `U`, 인증 서버 `S`, 비상 카드/파일 `R`)에서 얼굴인식은 **인증 서버가 조각 `S`를 내려줄지 판단하기 위한 본인/지정 상속인 확인 단계**만 담당합니다. 얼굴 벡터 자체가 키 조각이나 개인키 시드로 쓰이지는 않습니다.
+Chronos Vault의 2-of-3 CGGMP20 임계서명 구조(참여자 1: 사용자 기기 `U`, 참여자 2: 인증/서명 서버 `S`, 참여자 3: 복구/상속 담당 `R`, `bitcoin/README.md` 참고)에서 얼굴인식은 **참여자 2(서버 `S`)가 거래 공동 서명(`TPreSign` / `sign-share`)을 승인하고 부분 서명(`PartyResponse`)을 반환할지 판단하는 본인/지정 상속인 확인 단계**만 담당합니다. 얼굴 벡터 자체가 키 조각이나 개인키 시드로 쓰이지 않으며, 서버 `S`의 장기 암호화 키 조각(`secrets.cvparty`)은 클라이언트로 전송되지 않습니다.
 
 원본 카메라 이미지는 서버로 보내지 않고, 브라우저(기기) 안에서 라이브니스 검사와 128차원 L2 정규화 벡터 추출을 끝낸 뒤 벡터 문자열만 전달합니다.
 
@@ -12,7 +12,7 @@ Chronos Vault의 2-of-3 Shamir 구조(사용자 기기 `U`, 인증 서버 `S`, �
 ```
 biometrics/
   src/
-    config.ts       # 차원(128), 기본 임계값, 품질/라이브니스 기준값
+    config.ts       # 차원(128), 기본/권장 임계값, 참여자 ID(PARTY_ID), 품질/라이브니스 기준값
     vector.ts       # L2 정규화, 코사인 유사도, pgvector 문자열 변환, 버퍼 wipe
     geometry.ts     # MediaPipe 478 랜드마크 기반 EAR, yaw/pitch/roll, 5점 정렬 변환
     liveness.ts     # 눈 깜빡임(EAR 히스테리시스) + 고개 좌/우 회전 챌린지
@@ -103,10 +103,13 @@ npm run dev
 ```ts
 import {
   BiometricsEngine,
+  PARTY_ID,
+  RECOMMENDED_VAULT_THRESHOLD,
   openCamera,
   stopCamera,
   buildEnrollPayload,
   buildVerifyPayload,
+  hashSigningPackage,
   type SessionProgress,
 } from '../biometrics/src';
 
@@ -149,7 +152,11 @@ const enrolled = await engine.enroll(videoEl, {
 });
 
 // role: 'owner' | 'heir'
-const payload = buildEnrollPayload(vaultId, 'owner', enrolled);
+// publicKey: bitcoin/ threshold-runner keygen으로 생성된 33바이트 압축 SEC1 공동 공개키(public-key.json)
+const payload = buildEnrollPayload(vaultId, 'owner', enrolled, {
+  publicKey: masterPublicKeyHex,
+  challengeNonce: serverNonce,
+});
 
 await fetch('/api/vault/face/enroll', {
   method: 'POST',
@@ -160,9 +167,11 @@ await fetch('/api/vault/face/enroll', {
 
 등록 취소 버튼에서는 `controller.abort()`를 호출하면 루프가 즉시 중단되고 `BiometricsSessionError` (`code === 'aborted'`)가 발생합니다.
 
-### 3.3 얼굴 인증 (서버 조각 `S` 요청)
+### 3.3 얼굴 인증 (참여자 2 서버 `S` 공동 서명 승인 요청)
 
-분실 복구(`purpose: 'recovery'`), 사후 상속(`purpose: 'inheritance'`), 일반 서명(`purpose: 'normal_sign'`) 모두 같은 `verify()` 함수를 사용합니다.
+일반 서명(`purpose: 'normal_sign'`, 서명자 `[1, 2]`), 분실 복구(`purpose: 'recovery'`, 서명자 `[2, 3]`), 사후 상속(`purpose: 'inheritance'`, 서명자 `[2, 3]`) 모두 같은 `verify()` 함수를 사용합니다.
+
+`bitcoin/` 코디네이터가 만든 `SigningPackage` JSON(`prepareTransaction` 또는 `payment.json`)의 SHA-256 해시(`hashSigningPackage`)와 서버가 발급한 일회성 `challengeNonce`를 함께 묶어 보내면, 인증 결과가 다른 송금 요청에 재사용되는 것을 막을 수 있습니다.
 
 ```ts
 const captured = await engine.verify(videoEl, {
@@ -172,7 +181,13 @@ const captured = await engine.verify(videoEl, {
   },
 });
 
-const payload = buildVerifyPayload(vaultId, 'heir', 'inheritance', captured);
+const signingPackageHash = await hashSigningPackage(signingPackageJson);
+const payload = buildVerifyPayload(vaultId, 'heir', 'inheritance', captured, {
+  publicKey: masterPublicKeyHex,
+  challengeNonce: serverNonce,
+  signingPackageHash,
+  signers: [PARTY_ID.SERVER, PARTY_ID.RECOVERY], // [2, 3]
+});
 
 const res = await fetch('/api/vault/face/verify', {
   method: 'POST',
@@ -180,10 +195,13 @@ const res = await fetch('/api/vault/face/verify', {
   body: JSON.stringify(payload),
 });
 const data = await res.json();
-// data.verified === true 일 때만 data.shareS를 받아 기기의 U 또는 비상 조각 R과 결합
+// data.verified === true 일 때:
+// - 서버가 직접 Party 2 서명을 수행하면 data.partyResponse(PartyResponse JSON)를 반환 -> combineTransaction에 전달
+// - 인증 서버와 서명 어댑터가 분리되어 있으면 data.approvalToken을 반환 -> Party 2 어댑터 호출 시 전달
+// (Party 2의 장기 암호화 키 파일 secrets.cvparty 자체는 클라이언트로 내려주지 않음)
 ```
 
-백엔드 붙이기 전에 프론트 단독으로 매칭 테스트를 해 보려면 `engine.verifyLocal(videoEl, referenceVector, { lang: 'ko' })`를 사용하면 됩니다.
+백엔드 붙이기 전에 프론트 단독으로 매칭 테스트를 해 보려면 `engine.verifyLocal(videoEl, referenceVector, { lang: 'ko', threshold: RECOMMENDED_VAULT_THRESHOLD })`를 사용하면 됩니다.
 
 ### 3.4 에러 코드 정리
 
@@ -197,7 +215,7 @@ const data = await res.json();
 
 ### 3.5 정지 이미지에서 벡터 추출 (`extractFromImage`)
 
-사진 파일이나 캔버스에서 바로 벡터를 뽑을 때 사용합니다. 라이브니스 검사가 없으므로 **서버 조각 `S` 인증에는 쓰지 말고**, 테스트나 데이터 확인 용도로만 사용하세요.
+사진 파일이나 캔버스에서 바로 벡터를 뽑을 때 사용합니다. 라이브니스 검사가 없으므로 **참여자 2(서버 `S`) 서명 승인 인증에는 쓰지 말고**, 테스트나 데이터 확인 용도로만 사용하세요.
 
 ```ts
 const img = await loadImage('/some-face.jpg'); // HTMLImageElement, canvas, ImageBitmap 등
@@ -256,7 +274,9 @@ tailscale serve --https=443 off               # 테스트가 끝나면 종료
     "steps": ["blink", "turn_left"],
     "blinkCount": 1,
     "durationMs": 2840
-  }
+  },
+  "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "challengeNonce": "srv-nonce-one-time-uuid"
 }
 ```
 
@@ -272,11 +292,16 @@ tailscale serve --https=443 off               # 테스트가 끝나면 종료
     "steps": ["turn_right", "blink"],
     "blinkCount": 1,
     "durationMs": 3120
-  }
+  },
+  "publicKey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "challengeNonce": "srv-nonce-one-time-uuid",
+  "signingPackageHash": "a3f1...64hex",
+  "signers": [2, 3]
 }
 ```
 
-`embedding`은 `Float32Array(128)`을 L2 정규화한 뒤 pgvector 텍스트 리터럴(`"[v0,v1,...,v127]"`)로 직렬화한 값입니다.
+- `embedding`은 `Float32Array(128)`을 L2 정규화한 뒤 pgvector 텍스트 리터럴(`"[v0,v1,...,v127]"`)로 직렬화한 값입니다.
+- `publicKey`, `challengeNonce`, `signingPackageHash`, `signers`는 선택 필드이며, `buildEnrollPayload`/`buildVerifyPayload`의 마지막 옵션 인자로 넘기면 형식 검증(33바이트 압축 SEC1 hex, 64자리 SHA-256 hex, 서로 다른 참여자 ID 쌍 `{1,2,3}`)을 거쳐 포함됩니다.
 
 ### 4.2 pgvector 코사인 유사도 비교
 
@@ -284,6 +309,7 @@ tailscale serve --https=443 off               # 테스트가 끝나면 종료
 
 ```sql
 -- 테이블 컬럼 예시
+-- public_key      text UNIQUE NOT NULL  -- bitcoin/ public-key.json (33바이트 압축 SEC1 hex)
 -- owner_embedding vector(128)
 -- heir_embedding  vector(128)
 
@@ -291,10 +317,11 @@ SELECT
   1 - (owner_embedding <=> $1::vector(128)) AS similarity
 FROM vaults
 WHERE id = $2
-  AND (1 - (owner_embedding <=> $1::vector(128))) >= $3;
+  AND public_key = $3
+  AND (1 - (owner_embedding <=> $1::vector(128))) >= $4;
 ```
 
-상속(`role = 'heir'`, `purpose = 'inheritance'`)의 경우 위 유사도 조건에 더해 서버 측 지정 상속인 기록, 비활성 타임락 또는 사망 증빙 확인이 모두 통과했을 때만 조각 `S`를 반환해야 합니다. 비상 조각 `R`은 서버로 전송되지 않습니다.
+상속(`role = 'heir'`, `purpose = 'inheritance'`, `signers = [2, 3]`)의 경우 위 유사도 조건에 더해 서버 측 지정 상속인 기록, 비활성 타임락 또는 사망 증빙 확인, 그리고 `signingPackageHash`가 실제 검토된 `payment.json`과 일치하는지 모두 통과했을 때만 참여자 2(`S`)의 로컬 암호화 보관본(`secrets.cvparty`)으로 `TPreSign` + `sign-share`를 수행해 `PartyResponse` 부분 서명(또는 단기 `approvalToken`)을 반환해야 합니다. 참여자 3(`R`)의 키 조각은 서버로 전송되지 않습니다.
 
 ### 4.3 임계값(threshold) 설정 주의사항
 
@@ -326,7 +353,7 @@ WHERE id = $2
 
 (1,000쌍은 기본 설정, 2,200쌍은 `allowBackgroundFaces` 사용 결과입니다.)
 
-- **권장**: 얼굴 인증 결과로 서버 조각 `S`를 내주는 구조에서는 다른 사람 통과가 더 위험하므로, 두 데이터 모두에서 오수락이 0이었던 `0.40` 이상을 출발점으로 삼고 4.3의 보정 절차(실제 조명/카메라 환경)로 최종 값을 정하는 것을 권장합니다. 코드의 `SFACE_COSINE_THRESHOLD`(0.363)는 모델 기준값이라 그대로 두었습니다.
+- **권장**: 얼굴 인증 결과로 참여자 2(서버 `S`)의 공동 서명을 승인하는 구조에서는 다른 사람 통과가 더 위험하므로, 두 데이터 모두에서 오수락이 0이었던 `0.40` (`RECOMMENDED_VAULT_THRESHOLD`) 이상을 출발점으로 삼고 4.3의 보정 절차(실제 조명/카메라 환경)로 최종 값을 정하는 것을 권장합니다. 코드의 `SFACE_COSINE_THRESHOLD`(0.363)는 모델 기준값이라 그대로 두고 `RECOMMENDED_VAULT_THRESHOLD`(0.40)를 별도로 export합니다.
 
 **직접 다시 돌려보는 방법**
 
@@ -363,39 +390,39 @@ WHERE id = $2
 
 ---
 
-## 7. 권장 구성도
+## 7. 권장 구성도 (`bitcoin/` 2-of-3 CGGMP20 임계서명 연동)
 
-아래는 얼굴인식 모듈을 서버, DB, 키 조각과 연결할 때 권장하는 구성입니다. 현재 저장소에는 이 중 기기 쪽 모듈(`biometrics/`)만 구현되어 있고, 서버와 DB 부분은 연동 시 참고용 권장안입니다.
+아래는 얼굴인식 모듈을 `bitcoin/`의 2-of-3 CGGMP20 임계서명(참여자 1=`U`, 참여자 2=`S`, 참여자 3=`R`, 암호화 저장소 `party_store.rs`) 및 인증 서버/DB와 연결할 때 권장하는 구성입니다. 현재 저장소에는 기기 쪽 얼굴인식 모듈(`biometrics/`)과 임계서명 지갑(`bitcoin/`, `threshold-online/`, 루트 CGGMP20)이 구현되어 있고, 인증 API/DB 부분은 통합 서버 구현 시 참고용 규격입니다.
 
 ```mermaid
 flowchart LR
-  subgraph Device["사용자 기기 (브라우저)"]
+  subgraph Device["사용자 기기 (브라우저 / 참여자 1: U)"]
     CAM["웹캠<br/>camera.ts"] --> LM["랜드마크 478점<br/>landmarker.ts"]
     LM --> LIVE["라이브니스<br/>liveness.ts"]
     LIVE --> Q["품질 게이트<br/>quality.ts"]
     Q --> AL["5점 정렬<br/>align.ts"]
     AL --> EMB["SFace 128차원 벡터<br/>embedder.ts"]
-    EMB --> SES["요청 payload<br/>session.ts"]
-    U[("조각 U<br/>기기 보관")]
+    EMB --> SES["요청 payload<br/>session.ts<br/>(+publicKey, nonce, signingPackageHash)"]
+    U[("참여자 1 (U)<br/>암호화 키 + PresignRecord<br/>signShare / spent-nonces")]
   end
-  subgraph Server["인증 서버"]
-    API["얼굴 인증 API<br/>시도 횟수 제한 + nonce 검증"] --> DB[("pgvector<br/>소유자/상속인 벡터")]
-    API --> SS[("조각 S")]
+  subgraph Server["인증 / 서명 서버 (참여자 2: S)"]
+    API["얼굴 인증 API<br/>시도 제한 + nonce + packageHash 검증"] --> DB[("pgvector<br/>소유자/상속인 벡터")]
+    API -- "유사도 >= 임계값일 때만<br/>서명 어댑터 승인" --> S2["참여자 2 (S) 로컬 서명<br/>secrets.cvparty 복호화<br/>TPreSign + sign-share"]
   end
-  R[("비상 카드/파일<br/>조각 R")]
-  SES -- "벡터만 HTTPS 전송<br/>(원본 이미지 전송 안 함)" --> API
-  API -- "유사도가 임계값 이상일 때만<br/>S 반환" --> COMB["2-of-3 결합<br/>U+S 또는 R+S"]
-  U --> COMB
-  R -. "기기 분실 / 상속" .-> COMB
-  COMB --> SIGN["서명 및 송금"]
+  R[("참여자 3 (R)<br/>복구/상속 암호화 키<br/>sign-share")]
+  SES -- "벡터 + 거래 해시만 HTTPS 전송<br/>(원본 이미지 전송 안 함)" --> API
+  S2 -- "PartyResponse 부분 서명 반환<br/>(장기 키 S는 서버 밖으로 나가지 않음)" --> COMB["코디네이터 combineTransaction<br/>[1,2] U+S 또는 [2,3] S+R"]
+  U -- "reply-1.json (부분 서명)" --> COMB
+  R -. "기기 분실 / 상속<br/>reply-3.json (부분 서명)" .-> COMB
+  COMB --> SIGN["서명 검증 및 Bitcoin Testnet4 브로드캐스트"]
 ```
 
 **연결 시 권장 사항**
 
-- **얼굴은 `S`를 내줄지 판단만 합니다.** 벡터는 키 조각이나 시드로 쓰지 않고, 조각 결합(2-of-3)은 기존 Shamir/서명 모듈이 담당합니다.
+- **얼굴은 참여자 2(서버 `S`)의 공동 서명 승인만 담당합니다.** 벡터는 키 조각이나 시드로 쓰지 않으며, 참여자 2의 암호화 키 조각(`secrets.cvparty` + `.key`)은 서버 안에서만 복호화해 `TPreSign`/`sign-share`를 수행하고 결과인 부분 서명(`PartyResponse`)만 반환합니다.
 - **비교는 서버(DB)에서 합니다.** 기기가 보낸 벡터를 4.2의 pgvector 쿼리로 저장된 소유자/상속인 벡터와 비교하고, 기기 쪽 `verifyLocal` 결과는 화면 안내용으로만 씁니다.
-- **요청마다 서버가 발급한 nonce와 시간 제한을 붙입니다.** 탈취한 과거 벡터를 다시 보내는 공격(6절)을 줄이기 위해 nonce는 한 번만 쓰고, 일정 시간이 지나면 무효로 합니다.
-- **시도 횟수 제한과 잠금**: 금고 단위로 실패 횟수를 세고, 기준을 넘으면 일정 시간 잠그거나 비상 조각 `R` 경로로만 복구하게 합니다.
-- **임계값은 한 곳에서 관리합니다.** 프론트의 `SFACE_COSINE_THRESHOLD`와 서버 SQL의 `$3`가 항상 같은 값이 되도록 설정 파일 하나에서 읽어 오게 합니다.
-- **소유자와 상속인 벡터는 따로 저장**하고, 상속인 인증으로 `S`를 내줄 때는 지정 기록과 사망 증빙(또는 타임락)을 서버에서 함께 확인합니다.
+- **요청마다 서버 nonce와 거래 해시(`signingPackageHash`)를 묶습니다.** 탈취한 과거 벡터나 이전 거래 승인을 재사용하는 공격(6절)을 막기 위해 `challengeNonce`는 일회성으로 만료시키고, `hashSigningPackage(paymentJson)`으로 검토된 `SigningPackage`(`public_key`, `signers`, 수신자, 금액)와 정확히 일치할 때만 서명 어댑터를 실행합니다.
+- **시도 횟수 제한과 잠금**: 금고(`vaultId` / `publicKey`) 단위로 실패 횟수를 세고, 기준을 넘으면 일정 시간 잠그거나 별도 복구 절차를 거치게 합니다.
+- **임계값은 한 곳에서 관리합니다.** 프론트의 `RECOMMENDED_VAULT_THRESHOLD`(0.40, 보정 후 확정값)와 서버 SQL의 `$4`가 항상 같은 값이 되도록 설정 파일 하나에서 읽어 오게 합니다.
+- **소유자와 상속인 벡터는 따로 저장**하고, 상속인 인증(`role: 'heir'`, `signers: [2, 3]`)으로 참여자 2 공동 서명을 승인할 때는 지정 기록과 사망 증빙(또는 타임락)을 서버에서 함께 확인합니다.
 - **벡터 DB 접근 제한**: 얼굴 벡터도 개인정보이므로 인증 API만 해당 테이블에 접근하게 하고, 전송은 HTTPS만 허용합니다.

@@ -1,6 +1,7 @@
 import {
   BiometricsEngine,
-  SFACE_COSINE_THRESHOLD,
+  PARTY_ID,
+  RECOMMENDED_VAULT_THRESHOLD,
   buildEnrollPayload,
   buildVerifyPayload,
   openCamera,
@@ -35,7 +36,7 @@ const templates: Record<SubjectRole, FaceVector | null> = {
   heir: null,
 };
 
-thresholdInput.value = String(SFACE_COSINE_THRESHOLD);
+thresholdInput.value = String(RECOMMENDED_VAULT_THRESHOLD);
 
 function setBusy(busy: boolean): void {
   const ready = engine !== null;
@@ -128,7 +129,7 @@ btnVerify.addEventListener('click', async () => {
   activeAbort = new AbortController();
   setBusy(true);
   try {
-    const threshold = Number(thresholdInput.value) || SFACE_COSINE_THRESHOLD;
+    const threshold = Number(thresholdInput.value) || RECOMMENDED_VAULT_THRESHOLD;
     const purpose = role === 'owner' ? 'recovery' : 'inheritance';
     const res = await engine.verifyLocal(video, reference, {
       lang: 'ko',
@@ -140,7 +141,9 @@ btnVerify.addEventListener('click', async () => {
     matchStatus.textContent = `${res.match.matched ? 'MATCH' : 'REJECT'} (sim=${res.match.similarity.toFixed(3)}, dist=${res.match.distance.toFixed(3)})`;
     matchStatus.className = `badge ${res.match.matched ? 'ok' : 'err'}`;
 
-    const payload = buildVerifyPayload('demo-vault-001', role, purpose, res);
+    const payload = buildVerifyPayload('demo-vault-001', role, purpose, res, {
+      signers: [PARTY_ID.SERVER, PARTY_ID.RECOVERY],
+    });
     payloadOut.textContent = JSON.stringify(
       {
         requestPayload: {
@@ -153,7 +156,7 @@ btnVerify.addEventListener('click', async () => {
       2,
     );
     promptEl.textContent = res.match.matched
-      ? `Verified ${role} (similarity ${res.match.similarity.toFixed(3)} >= ${threshold}). Ready to request Share S.`
+      ? `Verified ${role} (similarity ${res.match.similarity.toFixed(3)} >= ${threshold}). Ready to authorize Party 2 (S) co-signing.`
       : `Rejected ${role} (similarity ${res.match.similarity.toFixed(3)} < ${threshold}).`;
   } catch (err) {
     promptEl.textContent = `Verify failed: ${err instanceof Error ? err.message : String(err)}`;
