@@ -1,3 +1,4 @@
+mod party_store;
 mod protocol;
 
 use bitcoin::CompressedPublicKey;
@@ -76,6 +77,8 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
     file.persist_noclobber(path)?;
+    #[cfg(unix)]
+    File::open(path.parent().ok_or("missing parent directory")?)?.sync_all()?;
     Ok(())
 }
 
@@ -99,6 +102,7 @@ fn keygen(wallet: &Path) -> Result<CompressedPublicKey> {
     private_dir(wallet)
         .map_err(|e| format!("cannot create new wallet {}: {e}", wallet.display()))?;
     write_new(&wallet.join(".gitignore"), b"*\n")?;
+    write_new(&wallet.join(party_store::FORMAT_FILE), party_store::MAGIC)?;
     private_dir(&wallet.join("sessions"))?;
     private_dir(&wallet.join("batches"))?;
     for id in PARTIES {
