@@ -78,7 +78,7 @@ impl SigningPackage {
 }
 
 /// Obtained locally at key generation, independent of the coordinator's package.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignerIdentity {
     pub party_id: u64,

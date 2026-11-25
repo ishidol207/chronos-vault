@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-threshold-runner = ["dep:threshold-ecdsa", "dep:rand", "dep:ring"]
+default = ["web-bindings"]
+web-bindings = ["getrandom/js", "dep:js-sys", "dep:wasm-bindgen-futures", "dep:wasm-bindgen"]
+browser-signer = ["dep:threshold-ecdsa", "dep:rand", "getrandom/custom"]
+threshold-runner = ["dep:threshold-ecdsa", "dep:rand", "dep:ring", "dep:axum", "dep:tokio"]
 
 [[example]]
 name = "threshold-runner"
@@ -15,6 +18,8 @@ required-features = ["threshold-runner"]
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+threshold-ecdsa = { path = "..", optional = true, default-features = false }
+rand = { version = "0.8", optional = true }
 threshold-ecdsa-online = { path = "../threshold-online" }
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "pkcs8"] }
 serde_json = "1"
@@ -25,16 +30,16 @@ thiserror = "2"
 zeroize = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-threshold-ecdsa = { path = "..", optional = true }
-rand = { version = "0.8", optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"], optional = true }
 ring = { version = "0.17", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
-js-sys = "0.3"
-wasm-bindgen-futures = "0.4"
-wasm-bindgen = "0.2"
+getrandom = "0.2"
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
 k256 = { version = "0.13", features = ["serde", "pem"] }

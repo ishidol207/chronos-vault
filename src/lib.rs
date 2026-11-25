@@ -34,7 +34,6 @@ pub use protocol::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use wasm_bindgen::prelude::*;
 
 use crate::auxinfo::AuxInfoParticipant;
 use crate::curve::{CurveTrait, ScalarTrait, SignatureTrait};

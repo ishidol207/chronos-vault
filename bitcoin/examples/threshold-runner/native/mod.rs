@@ -1,5 +1,7 @@
 mod party_store;
 mod protocol;
+mod remote;
+mod server;
 
 use bitcoin::CompressedPublicKey;
 use chronos_vault::{SigningPackage, parse_master_key};
@@ -27,6 +29,21 @@ enum Command {
     Keygen { wallet: PathBuf },
     /// Create one pair of presign records per reviewed input and print the batch directory.
     Presign { wallet: PathBuf, payment: PathBuf },
+    /// Serve the Testnet4 S signer. Put TLS in front for remote devices.
+    Serve {
+        wallet: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        listen: std::net::SocketAddr,
+    },
+    /// Run U or R locally against the S server. Read a session ticket on stdin.
+    RemoteSign {
+        wallet: PathBuf,
+        payment: PathBuf,
+        #[arg(long)]
+        server: String,
+        #[arg(long, value_enum)]
+        purpose: remote::Purpose,
+    },
     #[command(hide = true)]
     Worker { party_dir: PathBuf, id: u64 },
 }
@@ -55,6 +72,15 @@ pub(super) fn run() -> Result<()> {
         Command::Keygen { wallet } => println!("{}", keygen(&wallet)?),
         Command::Presign { wallet, payment } => {
             println!("{}", presign(&wallet, &payment)?.display());
+        }
+        Command::Serve { wallet, listen } => server::serve(wallet, listen)?,
+        Command::RemoteSign {
+            wallet,
+            payment,
+            server,
+            purpose,
+        } => {
+            remote::run_client(&wallet, &payment, &server, purpose)?;
         }
         Command::Worker { party_dir, id } => protocol::worker(&party_dir, id)?,
     }

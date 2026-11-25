@@ -8,13 +8,13 @@ license = "MIT"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = []
+default = ["js-entropy"]
+js-entropy = ["getrandom/js", "libpaillier/wasm"]
 flame_it = ["flame", "flamer"]
 
 [dependencies]
 threshold-ecdsa-online = { path = "threshold-online" }
-getrandom = { version = "0.2", features = ["js"] }
-wasm-bindgen = "0.2.100"
+getrandom = "0.2"
 bincode = "1"
 bytemuck = "1.13"
 bytemuck_derive = "1.4"
@@ -41,8 +41,6 @@ libpaillier = { version = "0.5", default-features = false, features = ["rust"] }
 rayon = "1.11.0"
 
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-libpaillier = { version = "0.5", default-features = false, features = ["wasm"] }
 
 [dev-dependencies]
 hex-literal = "0.4"

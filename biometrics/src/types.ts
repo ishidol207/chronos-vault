@@ -1,14 +1,14 @@
 /**
  * Integration types shared with the frontend and auth server.
  *
- * Chronos Vault splits the master seed into 3 Shamir shares (2-of-3):
+ * Chronos Vault uses three threshold ECDSA shares (2-of-3):
  *   - U: user device
  *   - S: auth server
  *   - R: emergency card / file
  *
  * Facial recognition never acts as a key share itself. It only produces a
  * normalized 128-D vector after on-device liveness verification so the server
- * can decide whether to release share S.
+ * can decide whether S participates in signing.
  */
 
 import type { ChallengeStep, LivenessReport } from './liveness';
@@ -33,7 +33,7 @@ export interface FaceEnrollPayload {
   };
 }
 
-/** Payload sent by the frontend when requesting server share S. */
+/** Payload sent by the frontend when requesting a signing session with S. */
 export interface FaceVerifyPayload {
   vaultId: string;
   role: SubjectRole;
@@ -51,8 +51,8 @@ export interface FaceVerifyPayload {
 export interface FaceVerifyServerResponse {
   verified: boolean;
   similarity: number;
-  /** Encrypted or transport-protected server share S, present only when verified is true. */
-  shareS?: string;
+  /** Transaction-scoped ticket issued by S once the server has verified all required conditions. */
+  ticket?: string;
   reason?: string;
 }
 

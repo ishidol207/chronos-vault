@@ -4,8 +4,14 @@ mod transaction;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mempool;
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(target_arch = "wasm32"))]
+pub mod nonce;
+#[cfg(all(target_arch = "wasm32", feature = "web-bindings"))]
 mod wasm;
+#[cfg(any(feature = "threshold-runner", feature = "browser-signer"))]
+pub mod presign;
+#[cfg(all(target_arch = "wasm32", feature = "browser-signer"))]
+mod browser;
 
 pub use error::VaultError;
 pub use signing::{

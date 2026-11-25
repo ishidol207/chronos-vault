@@ -1,7 +1,7 @@
 # Chronos Vault 얼굴인식 모듈 사용 가이드
 
-`biometrics/` 폴더에 있는 얼굴인식 모듈 연동 문서입니다.
-Chronos Vault의 2-of-3 Shamir 구조(사용자 기기 `U`, 인증 서버 `S`, 비상 카드/파일 `R`)에서 얼굴인식은 **인증 서버가 조각 `S`를 내려줄지 판단하기 위한 본인/지정 상속인 확인 단계**만 담당합니다. 얼굴 벡터 자체가 키 조각이나 개인키 시드로 쓰이지는 않습니다.
+`biometrics/` 폴더의 얼굴인식 모듈 연동 문서입니다. 송금 화면·S 서버와 연결하는 순서는 [팀원 연동 가이드](README.md)에 있습니다.
+Chronos Vault의 2-of-3 임계 ECDSA 구조(사용자 기기 `U`, 인증 서버 `S`, 비상 카드/파일 `R`)에서 얼굴인식은 **인증 서버가 자기 조각 `S`로 서명에 참여할지 판단하기 위한 본인/지정 상속인 확인 단계**만 담당합니다. 얼굴 벡터 자체가 키 조각이나 개인키 시드로 쓰이지는 않습니다.
 
 원본 카메라 이미지는 서버로 보내지 않고, 브라우저(기기) 안에서 라이브니스 검사와 128차원 L2 정규화 벡터 추출을 끝낸 뒤 벡터 문자열만 전달합니다.
 
@@ -90,7 +90,7 @@ npm run dev
 
 - 패키지는 TypeScript 소스를 그대로 내보내므로 Vite, webpack 등 TS를 처리하는 번들러에서 바로 동작합니다. Vite + `tsc` 조합으로 새로 클론한 상태에서 위 순서대로 설치, 빌드, 실행(같은 사람 사진 유사도 `0.84` 일치, 다른 사람 `-0.02` 불일치, 서버 payload 생성)까지 확인했습니다.
 - Next.js에서는 `next.config.js`에 `transpilePackages: ['@chronos-vault/biometrics']`를 추가해야 합니다.
-- **Rust/WASM 버전을 따로 만들지 않은 이유**: 지갑 모듈(`bitcoin/`)은 Rust를 `wasm-pack`으로 빌드해 `walletAddress`, `signShare` 같은 함수를 JSON 문자열로 주고받는 방식입니다. 얼굴인식은 무거운 부분(MediaPipe, ONNX Runtime)이 이미 WebAssembly로 동작하고 나머지는 카메라와 캔버스를 다루는 브라우저 코드라서, Rust로 다시 감싸도 속도나 정확도는 그대로이고 용량과 복잡도만 늘어납니다. 대신 지갑 모듈과 맞물리는 부분은 같은 방식으로 맞춰 두었습니다: 서버로 보내는 값은 `buildEnrollPayload` / `buildVerifyPayload`가 만드는 일반 JSON이고, 벡터는 pgvector 문자열입니다.
+- **서명 래퍼와의 연결**. 얼굴 모듈은 `buildEnrollPayload()`와 `buildVerifyPayload()`로 인증 핸들러에 보낼 JSON을 만듭니다. 핸들러가 이번 거래의 인증을 마치면 S에서 받은 `ticket`을 프론트로 반환하고, 프론트는 이를 `signWithServer()`에 전달합니다.
 
 ---
 
@@ -132,6 +132,8 @@ await engine.dispose();
 
 ### 3.2 얼굴 등록 (지갑 생성 시 소유자 / 지정 상속인)
 
+이 절의 `/api/vault/face/enroll`과 다음 절의 `/api/vault/face/verify`는 통합 앱에서 구현할 경로 예시입니다. 지갑별 등록 자료 저장과 대조는 인증 핸들러가 담당합니다.
+
 등록은 라이브니스(랜덤 순서로 눈 1회 깜빡임 + 좌/우 고개 회전 1회) 통과 후 정면 품질 기준을 만족하는 프레임 5장을 추출해 평균/정규화합니다. 5장 사이의 일관성이 기준(`minSampleConsistency = 0.5`)보다 낮으면 실패 처리합니다.
 
 ```ts
@@ -160,7 +162,7 @@ await fetch('/api/vault/face/enroll', {
 
 등록 취소 버튼에서는 `controller.abort()`를 호출하면 루프가 즉시 중단되고 `BiometricsSessionError` (`code === 'aborted'`)가 발생합니다.
 
-### 3.3 얼굴 인증 (서버 조각 `S` 요청)
+### 3.3 얼굴 인증 및 S와의 서명 세션 요청
 
 분실 복구(`purpose: 'recovery'`), 사후 상속(`purpose: 'inheritance'`), 일반 서명(`purpose: 'normal_sign'`) 모두 같은 `verify()` 함수를 사용합니다.
 
@@ -179,9 +181,13 @@ const res = await fetch('/api/vault/face/verify', {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(payload),
 });
+if (!res.ok) throw new Error('얼굴 인증 요청 실패');
 const data = await res.json();
-// data.verified === true 일 때만 data.shareS를 받아 기기의 U 또는 비상 조각 R과 결합
+if (!data.verified || !data.ticket) throw new Error('이 거래의 서명 티켓을 받지 못했습니다');
+// 상속 화면에서는 signWithServer({ packageJson, purpose: 'inheritance', ticket: data.ticket, files: rFiles }) 호출
 ```
+
+위 예제는 인증 핸들러가 이미 해당 사용자 세션에 거래별 챌린지를 연결했다고 가정합니다. `buildVerifyPayload()`에는 거래 해시나 챌린지 ID가 없습니다. 앱은 검증 요청을 해당 1회성 챌린지와 연결하고, 서버에 저장한 지갑·거래 원문 해시·목적을 확인해야 합니다. 티켓 발급과 서명 라운드 규격은 [서명 서버 연동 가이드](bitcoin/SIGNING_SERVER.md)에 있습니다.
 
 백엔드 붙이기 전에 프론트 단독으로 매칭 테스트를 해 보려면 `engine.verifyLocal(videoEl, referenceVector, { lang: 'ko' })`를 사용하면 됩니다.
 
@@ -294,7 +300,7 @@ WHERE id = $2
   AND (1 - (owner_embedding <=> $1::vector(128))) >= $3;
 ```
 
-상속(`role = 'heir'`, `purpose = 'inheritance'`)의 경우 위 유사도 조건에 더해 서버 측 지정 상속인 기록, 비활성 타임락 또는 사망 증빙 확인이 모두 통과했을 때만 조각 `S`를 반환해야 합니다. 비상 조각 `R`은 서버로 전송되지 않습니다.
+상속(`role = 'heir'`, `purpose = 'inheritance'`)의 경우 위 유사도 조건에 더해 서버가 지정 상속인 기록을 확인하고, 비활성 타임락 충족 또는 사망 증빙 확인까지 마쳐야 S가 서명에 참여합니다. 비상 조각 `R`은 서버로 전송되지 않습니다.
 
 ### 4.3 임계값(threshold) 설정 주의사항
 
@@ -326,7 +332,7 @@ WHERE id = $2
 
 (1,000쌍은 기본 설정, 2,200쌍은 `allowBackgroundFaces` 사용 결과입니다.)
 
-- **권장**: 얼굴 인증 결과로 서버 조각 `S`를 내주는 구조에서는 다른 사람 통과가 더 위험하므로, 두 데이터 모두에서 오수락이 0이었던 `0.40` 이상을 출발점으로 삼고 4.3의 보정 절차(실제 조명/카메라 환경)로 최종 값을 정하는 것을 권장합니다. 코드의 `SFACE_COSINE_THRESHOLD`(0.363)는 모델 기준값이라 그대로 두었습니다.
+- **권장**: 얼굴 인증 결과로 서버가 `S`로 서명에 참여하는 구조에서는 다른 사람 통과가 더 위험하므로, 두 데이터 모두에서 오수락이 0이었던 `0.40` 이상을 출발점으로 삼고 4.3의 보정 절차(실제 조명/카메라 환경)로 최종 값을 정하는 것을 권장합니다. 코드의 `SFACE_COSINE_THRESHOLD`(0.363)는 모델 기준값이라 그대로 두었습니다.
 
 **직접 다시 돌려보는 방법**
 
@@ -384,7 +390,7 @@ flowchart LR
   end
   R[("비상 카드/파일<br/>조각 R")]
   SES -- "벡터만 HTTPS 전송<br/>(원본 이미지 전송 안 함)" --> API
-  API -- "유사도가 임계값 이상일 때만<br/>S 반환" --> COMB["2-of-3 결합<br/>U+S 또는 R+S"]
+  SS -- "인증·거래 조건 충족 후 참여" --> COMB["임계서명 라운드<br/>U+S 또는 R+S"]
   U --> COMB
   R -. "기기 분실 / 상속" .-> COMB
   COMB --> SIGN["서명 및 송금"]
@@ -392,10 +398,10 @@ flowchart LR
 
 **연결 시 권장 사항**
 
-- **얼굴은 `S`를 내줄지 판단만 합니다.** 벡터는 키 조각이나 시드로 쓰지 않고, 조각 결합(2-of-3)은 기존 Shamir/서명 모듈이 담당합니다.
+- **얼굴 인증은 S의 서명 참여 조건입니다.** S는 인증 서버에 보관하고, 임계서명 모듈이 두 참여자의 부분서명을 결합합니다.
 - **비교는 서버(DB)에서 합니다.** 기기가 보낸 벡터를 4.2의 pgvector 쿼리로 저장된 소유자/상속인 벡터와 비교하고, 기기 쪽 `verifyLocal` 결과는 화면 안내용으로만 씁니다.
 - **요청마다 서버가 발급한 nonce와 시간 제한을 붙입니다.** 탈취한 과거 벡터를 다시 보내는 공격(6절)을 줄이기 위해 nonce는 한 번만 쓰고, 일정 시간이 지나면 무효로 합니다.
 - **시도 횟수 제한과 잠금**: 금고 단위로 실패 횟수를 세고, 기준을 넘으면 일정 시간 잠그거나 비상 조각 `R` 경로로만 복구하게 합니다.
 - **임계값은 한 곳에서 관리합니다.** 프론트의 `SFACE_COSINE_THRESHOLD`와 서버 SQL의 `$3`가 항상 같은 값이 되도록 설정 파일 하나에서 읽어 오게 합니다.
-- **소유자와 상속인 벡터는 따로 저장**하고, 상속인 인증으로 `S`를 내줄 때는 지정 기록과 사망 증빙(또는 타임락)을 서버에서 함께 확인합니다.
+- **소유자와 상속인 벡터는 따로 저장**하고, 상속 거래에 S가 참여할 때는 지정 기록과 사망 증빙(또는 타임락)을 서버에서 함께 확인합니다.
 - **벡터 DB 접근 제한**: 얼굴 벡터도 개인정보이므로 인증 API만 해당 테이블에 접근하게 하고, 전송은 HTTPS만 허용합니다.

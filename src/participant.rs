@@ -20,7 +20,6 @@ use crate::{
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tracing::error;
-use wasm_bindgen::prelude::wasm_bindgen;
 
 #[derive(Serialize, Deserialize)]
 pub enum ProcessOutcome<O> {

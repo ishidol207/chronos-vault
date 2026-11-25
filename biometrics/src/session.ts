@@ -167,7 +167,7 @@ export class BiometricsEngine {
 
   /**
    * Runs liveness + capture to produce a probe vector for server-side verification
-   * (to unlock share S for normal signing, owner recovery, or heir inheritance).
+   * (to authorize S to co-sign a transfer, recovery, or inheritance transaction).
    */
   async verify(
     video: HTMLVideoElement,
