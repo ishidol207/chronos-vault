@@ -7,7 +7,7 @@
  *   // Send enrolled.pgVector to server when registering owner or heir.
  *
  *   const probe = await engine.verify(videoEl, { lang: 'ko', onProgress });
- *   // Send probe.pgVector to auth server to request share S.
+ *   // Send probe.pgVector to auth server to authorize Party 2 (S) co-signing.
  */
 
 import { getDrawableSize, type DrawableImage } from './align';
@@ -29,12 +29,16 @@ import { verifyVector, type MatchResult } from './matcher';
 import { assessFrameQuality, DEFAULT_DOMINANCE_RATIO, dominantFace, qualityHint } from './quality';
 import type {
   AuthPurpose,
+  EnrollPayloadOptions,
   EnrollResult,
   FaceEnrollPayload,
   FaceVerifyPayload,
+  PartyId,
   SessionProgress,
+  SigningQuorum,
   SubjectRole,
   VerifyCaptureResult,
+  VerifyPayloadOptions,
 } from './types';
 import {
   cosineSimilarity,
@@ -167,7 +171,7 @@ export class BiometricsEngine {
 
   /**
    * Runs liveness + capture to produce a probe vector for server-side verification
-   * (to authorize S to co-sign a transfer, recovery, or inheritance transaction).
+   * (to authorize Party 2 (server S) co-signing for normal signing, owner recovery, or heir inheritance).
    */
   async verify(
     video: HTMLVideoElement,
@@ -421,17 +425,65 @@ export class BiometricsEngine {
   }
 }
 
+const COMPRESSED_SEC1_HEX_RE = /^(?:02|03)[0-9a-fA-F]{64}$/;
+const SHA256_HEX_RE = /^[0-9a-fA-F]{64}$/;
+const VALID_PARTY_IDS = new Set<number>([1, 2, 3]);
+
+function normalizePublicKey(publicKey: string): string {
+  const trimmed = publicKey.trim();
+  if (!COMPRESSED_SEC1_HEX_RE.test(trimmed)) {
+    throw new Error('publicKey must be a 33-byte compressed SEC1 hex string (66 hex chars starting with 02 or 03)');
+  }
+  return trimmed.toLowerCase();
+}
+
+function normalizeSha256Hex(hash: string): string {
+  const trimmed = hash.trim();
+  if (!SHA256_HEX_RE.test(trimmed)) {
+    throw new Error('signingPackageHash must be a 64-character SHA-256 hex string');
+  }
+  return trimmed.toLowerCase();
+}
+
+function normalizeSigners(signers: SigningQuorum): [PartyId, PartyId] {
+  const [a, b] = signers;
+  if (!VALID_PARTY_IDS.has(a) || !VALID_PARTY_IDS.has(b) || a === b) {
+    throw new Error('signers must be two distinct party IDs from {1, 2, 3}');
+  }
+  return [a, b];
+}
+
+function normalizeNonce(nonce: string): string {
+  const trimmed = nonce.trim();
+  if (trimmed.length === 0) {
+    throw new Error('challengeNonce must be a non-empty string when provided');
+  }
+  return trimmed;
+}
+
+/**
+ * Computes the lowercase 64-hex SHA-256 fingerprint of a serialized `SigningPackage` JSON
+ * string from `bitcoin/` (`prepareTransaction` / `payment.json`), so face verification can
+ * be bound to one specific reviewed transaction.
+ */
+export async function hashSigningPackage(packageJson: string): Promise<string> {
+  const bytes = new TextEncoder().encode(packageJson);
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /** Formats an EnrollResult into the JSON payload expected by the auth server. */
 export function buildEnrollPayload(
   vaultId: string,
   role: SubjectRole,
   result: EnrollResult,
+  options: EnrollPayloadOptions = {},
 ): FaceEnrollPayload {
   const durationMs =
     result.liveness.finishedAt !== undefined
       ? Math.max(0, Math.round(result.liveness.finishedAt - result.liveness.startedAt))
       : 0;
-  return {
+  const payload: FaceEnrollPayload = {
     vaultId,
     role,
     embedding: result.pgVector,
@@ -441,20 +493,28 @@ export function buildEnrollPayload(
       durationMs,
     },
   };
+  if (options.publicKey !== undefined) {
+    payload.publicKey = normalizePublicKey(options.publicKey);
+  }
+  if (options.challengeNonce !== undefined) {
+    payload.challengeNonce = normalizeNonce(options.challengeNonce);
+  }
+  return payload;
 }
 
-/** Formats a VerifyCaptureResult into the JSON payload expected by the auth server. */
+/** Formats a VerifyCaptureResult into the JSON payload expected by the auth / Party 2 signing server. */
 export function buildVerifyPayload(
   vaultId: string,
   role: SubjectRole,
   purpose: AuthPurpose,
   result: VerifyCaptureResult,
+  options: VerifyPayloadOptions = {},
 ): FaceVerifyPayload {
   const durationMs =
     result.liveness.finishedAt !== undefined
       ? Math.max(0, Math.round(result.liveness.finishedAt - result.liveness.startedAt))
       : 0;
-  return {
+  const payload: FaceVerifyPayload = {
     vaultId,
     role,
     purpose,
@@ -465,4 +525,17 @@ export function buildVerifyPayload(
       durationMs,
     },
   };
+  if (options.publicKey !== undefined) {
+    payload.publicKey = normalizePublicKey(options.publicKey);
+  }
+  if (options.challengeNonce !== undefined) {
+    payload.challengeNonce = normalizeNonce(options.challengeNonce);
+  }
+  if (options.signingPackageHash !== undefined) {
+    payload.signingPackageHash = normalizeSha256Hex(options.signingPackageHash);
+  }
+  if (options.signers !== undefined) {
+    payload.signers = normalizeSigners(options.signers);
+  }
+  return payload;
 }
