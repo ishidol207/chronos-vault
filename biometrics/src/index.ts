@@ -9,4 +9,5 @@ export * from './landmarker';
 export * from './embedder';
 export * from './camera';
 export * from './session';
+export * from './client';
 export * from './types';

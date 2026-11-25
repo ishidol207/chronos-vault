@@ -23,8 +23,12 @@ biometrics/
     matcher.ts      # 코사인 매칭(verifyVector) 및 임계값 보정(calibrateThreshold)
     camera.ts       # getUserMedia 웹캠 열기/닫기 헬퍼
     session.ts      # 등록/인증 전체 흐름(BiometricsEngine) 및 API payload 빌더
+    client.ts       # 프론트엔드 원콜 연동 헬퍼(enrollFaceWithServer, verifyTransactionWithFace)
     types.ts        # 프론트/서버 연동용 타입 정의
     index.ts        # 외부 export 진입점
+  server/
+    signing-session.mjs  # 백엔드 전용: 벡터 비교, 일회성 챌린지 저장소, 서명 서버 티켓 발급 헬퍼
+    signing-session.d.mts # 백엔드 헬퍼 TypeScript 타입 선언 (`@chronos-vault/biometrics/server`)
   scripts/
     fetch-models.mjs # MediaPipe / SFace 모델 다운로드 및 SHA-256 검증
     copy-assets.mjs  # 모델과 wasm 런타임 파일을 다른 앱의 정적 폴더로 복사
@@ -208,6 +212,48 @@ const signed = await signWithServer({
 
 백엔드 붙이기 전에 프론트 단독으로 매칭 테스트를 해 보려면 `engine.verifyLocal(videoEl, referenceVector, { lang: 'ko', threshold: RECOMMENDED_VAULT_THRESHOLD })`를 사용하면 됩니다.
 
+**프론트엔드 원콜(drop-in) 헬퍼 사용하기 (`client.ts`)**
+
+위처럼 `hashSigningPackage`, `buildVerifyPayload`, `fetch`, 응답 검사를 매번 직접 작성하지 않고 `enrollFaceWithServer` / `verifyTransactionWithFace` 한 번의 호출로 끝낼 수 있습니다. `packageJson`의 원문 해시 계산과 `public_key`·`signers` 추출까지 자동으로 처리합니다.
+
+```ts
+import { enrollFaceWithServer, verifyTransactionWithFace } from '@chronos-vault/biometrics';
+
+// 1) 얼굴 등록
+await enrollFaceWithServer({
+  engine,
+  video: videoEl,
+  vaultId,
+  role: 'owner',
+  enrollUrl: '/api/vault/face/enroll',
+  publicKey: masterPublicKeyHex,
+  challengeNonce: serverNonce,
+  lang: 'ko',
+  onProgress: (p) => setGuideText(p.message),
+});
+
+// 2) 거래 서명용 얼굴 인증 → 티켓 수신 → signWithServer() 전달
+const { response, ticket } = await verifyTransactionWithFace({
+  engine,
+  video: videoEl,
+  vaultId,
+  role: 'owner',
+  purpose: 'normal_sign',
+  packageJson: signingPackageJson, // 원문 그대로 전달 (publicKey, signers 자동 추출)
+  verifyUrl: '/api/vault/face/verify',
+  challengeNonce: serverNonce,
+  lang: 'ko',
+  onProgress: (p) => setGuideText(p.message),
+});
+
+if (!response.verified || !ticket) {
+  throw new Error(`얼굴 인증 실패 (유사도 ${response.similarity.toFixed(3)})`);
+}
+const signed = await signWithServer({
+  packageJson: signingPackageJson, purpose: 'normal_sign', ticket, files: uFiles,
+});
+```
+
 ### 3.4 에러 코드 정리
 
 `enroll`과 `verify`에서 발생할 수 있는 `BiometricsSessionError.code` 값입니다.
@@ -369,6 +415,56 @@ WHERE id = $2
    LFW_DIR=<폴더> npx vite eval --config eval/vite.config.ts
    ```
 3. 브라우저에서 `http://localhost:5180/?split=train` (뒷배경 얼굴 허용은 `&bg=1`)을 열면 모든 쌍을 처리한 뒤 결과가 `window.__lfw.results`(쌍별 유사도)에 담깁니다. 1,000쌍 기준 약 7~8분 걸립니다.
+
+### 4.5 백엔드 드롭인 헬퍼 (`@chronos-vault/biometrics/server`)
+
+Node.js 백엔드(Express/Fastify/Hono/Next.js API Route 등)에서는 외부 의존성 없는 `@chronos-vault/biometrics/server` (`biometrics/server/signing-session.mjs`)를 가져다 쓰면 서명 서버(`threshold-runner serve`)와의 연동 보일러플레이트를 크게 줄일 수 있습니다.
+
+- `fetchSigningContext(signerUrl)` — `GET /v1/signing/context`로 `instanceId`와 `publicKey` 조회
+- `createChallengeStore({ ttlSeconds })` — 일회성 `challengeNonce` 발급(`issue`) 및 검증·소비(`consume`, 리플레이·만료·거래 해시 불일치 차단)
+- `verifyFaceEmbedding(probe, stored, threshold)` — pgvector 리터럴(`"[v0,...,v127]"`) 또는 배열 간 코사인 유사도 비교 (기본 임계값 `RECOMMENDED_VAULT_THRESHOLD = 0.40`). PostgreSQL pgvector SQL 대신 메모리 비교가 필요할 때 바로 사용 가능
+- `buildSigningSessionRequest(packageJson, verification, privateKey)` — Ed25519 서명이 포함된 `POST /v1/signing/sessions` 요청 바디 생성
+- `issueSigningTicket(signerUrl, packageJson, verification, privateKey)` — 서명 요청 생성부터 `POST /v1/signing/sessions` 호출 및 `{ ticket, expiresInSeconds }` 반환까지 한 번에 수행
+- `authorizeFaceAndIssueTicket(options)` — 위 단계를 하나로 묶어 `FaceVerifyServerResponse` 형식(`{ verified, similarity, ticket, expiresInSeconds }`)을 바로 반환
+
+```ts
+import { readFileSync } from 'node:fs';
+import {
+  authorizeFaceAndIssueTicket,
+  createChallengeStore,
+  fetchSigningContext,
+} from '@chronos-vault/biometrics/server';
+
+const SIGNER_URL = process.env.CHRONOS_SIGNER_URL!; // 예: http://127.0.0.1:8080
+const AUTH_PRIVATE_KEY = readFileSync(process.env.CHRONOS_AUTH_PRIVATE_KEY_PATH!);
+const challenges = createChallengeStore({ ttlSeconds: 120 });
+
+// 1) 챌린지 발급 라우트 (POST /api/vault/face/challenge)
+const { instanceId, publicKey } = await fetchSigningContext(SIGNER_URL);
+const challenge = challenges.issue({
+  vaultId,
+  publicKey,
+  instanceId,
+  packageJson,
+  purpose,
+  role,
+});
+
+// 2) 얼굴 인증 및 서명 티켓 발급 라우트 (POST /api/vault/face/verify)
+const result = await authorizeFaceAndIssueTicket({
+  signerUrl: SIGNER_URL,
+  packageJson,        // 서버가 보관한 검토된 거래 원문 JSON
+  payload: req.body,  // 프론트에서 온 FaceVerifyPayload
+  storedEmbedding,    // DB에 저장된 owner_embedding 또는 heir_embedding
+  privateKey: AUTH_PRIVATE_KEY,
+  challengeStore: challenges,
+  inheritanceEvidence: purpose === 'inheritance' ? 'death_verified' : null,
+});
+// result: { verified: true, similarity: 0.72, ticket: '...', expiresInSeconds: 600 }
+// (또는 불일치 시 서명 서버를 호출하지 않고 { verified: false, similarity: 0.14, reason: 'face_mismatch' })
+```
+
+DB의 pgvector 쿼리(4.2절)로 직접 유사도를 비교하는 경우에도 `createChallengeStore`, `fetchSigningContext`, `issueSigningTicket`만 골라 조합할 수 있습니다.
 
 ---
 
