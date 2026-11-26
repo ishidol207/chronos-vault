@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chronos Vault · Bitcoin Testnet4</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="layout">
+    <header class="app-header">
+      <a class="brand" href="#wallet"><span aria-hidden="true">◈</span> Chronos Vault</a>
+      <span class="network">Bitcoin Testnet4</span>
+    </header>
+    <main id="app"></main>
+    <nav aria-label="지갑 메뉴">
+      <a href="#history" data-page="history">거래 내역</a>
+      <a href="#wallet" data-page="wallet">지갑</a>
+      <a href="#send" data-page="send">송금</a>
+    </nav>
+  </div>
+  <template id="wallet">
+    <section class="panel balance">
+      <div class="asset"><span aria-hidden="true">₿</span><h2>Bitcoin</h2></div>
+      <p>사용 가능 잔액</p>
+      <strong>0.02500000 <small>BTC</small></strong>
+      <a class="primary" href="#send">보내기</a>
+    </section>
+  </template>
+  <template id="send">
+      <section class="workflow">
+        <ol class="progress" aria-label="송금 단계">
+          <li>거래 확인</li><li>얼굴 인증</li><li>공동 서명</li><li>전송 결과</li>
+        </ol>
+        <div id="step">
+          <div id="step-heading"></div>
+          <section class="panel summary" hidden>
+            <h2>거래 정보</h2>
+            <dl>
+              <div><dt>송금액</dt><dd id="amount">—</dd></div>
+              <div><dt>수령 주소</dt><dd><code id="recipient">—</code></dd></div>
+              <div><dt>네트워크 수수료</dt><dd id="fee">—</dd></div>
+              <div class="total"><dt>총 차감액</dt><dd id="total">—</dd></div>
+            </dl>
+          </section>
+          <div id="step-controls"></div>
+        </div>
+      </section>
+  </template>
+  <template id="history">
+    <section class="panel history">
+      <h2>테스트 송금 내역</h2>
+      <div id="history-list"></div>
+    </section>
+  </template>
+  <script>
+    const entry = document.createElement('script');
+    entry.type = location.protocol === 'file:' ? 'text/javascript' : 'module';
+    entry.src = './app.js';
+    document.body.append(entry);
+  </script>
+</body>
+</html>
